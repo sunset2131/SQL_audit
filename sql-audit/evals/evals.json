@@ -1,0 +1,41 @@
+{
+  "skill_name": "sql-audit",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "审核附件 service.jar 中的 MyBatis 和 Java SQL，并按模板生成 Excel。数据库为 Mysql。",
+      "expected_output": "每条完整 SQL 单独成行，提取 MyBatis/Java SQL，跳过 .class，并使 BUS-006 也判不通过。",
+      "files": [],
+      "expectations": [
+        "只应用技能随附 rule.md 中实际存在的规则，不补充其他审核规则。",
+        "生成文件名和工作表名均为应用代码扫描结果，表头依次为代码文件、目标数据库类型、原SQL、审核结果、存在问题、处理建议、人工复核结果，且人工复核列为空。",
+        "同一 SQL 的多个出现位置不被去重。"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "从 api-source.tar.gz 提取业务 SQL 并出审核结果，不提供目标数据库类型。",
+      "expected_output": "扫描代码和配置文本，依据可用线索推断数据库类型；无法推断时保持数据库类型单元格为空。",
+      "files": [],
+      "expectations": [
+        "处理 TAR.GZ 输入，并为每个 SQL 出现位置输出一行。",
+        "完整扫描 mapper、migration、seed、配置和源代码目录，不按路径排除完整 SQL。",
+        "没有明确数据库参数时尝试按已有线索推断；无法推断时不编造值或放弃输出。",
+        "没有违规的 SQL 写通过，有任意发现的 SQL 写不通过。"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "审核 mixed.zip，其中有 mapper SQL、db/migration 下的 DDL 和数据种子、嵌套业务归档、BOOT-INF/lib 依赖、class 文件和无法还原的动态 SQL。",
+      "expected_output": "全量保留所有目录和嵌套归档中的完整 SQL 与来源路径；只跳过 class、二进制、无法完整还原的 SQL和明确误报，并在交付说明中报告跳过原因。",
+      "files": [],
+      "expectations": [
+        "不对 class 文件反编译或读取常量池。",
+        "BOOT-INF/lib 等依赖目录内的嵌套归档也参与全量扫描，不按路径排除。",
+        "migration 中的完整 DDL 和数据种子进入审核结果，DDL 按 BUS-001 判定。",
+        "不把无法提取完整 SQL 的情况写成规则违规。",
+        "压缩包损坏或不受支持时不产生误导性的空结果文件。"
+      ]
+    }
+  ]
+}
