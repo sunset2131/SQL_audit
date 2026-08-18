@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from xml.etree import ElementTree
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -107,9 +108,15 @@ class SqlAuditTests(unittest.TestCase):
             writer.render(os.path.join(ROOT, "assets", "SQL审核结果模板.xlsx"), output_path, loaded)
             writer.validate(output_path, 2)
             with zipfile.ZipFile(output_path) as archive:
+                self.assertIsNone(archive.testzip())
                 sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                summary_sheet = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
                 shared = archive.read("xl/sharedStrings.xml").decode("utf-8")
                 workbook = archive.read("xl/workbook.xml").decode("utf-8")
+                relationships = archive.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+                content_types = archive.read("[Content_Types].xml").decode("utf-8")
+                app_properties = archive.read("docProps/app.xml").decode("utf-8")
+            ElementTree.fromstring(summary_sheet)
             self.assertEqual(3, len(re.findall(r'<row\s+r="\d+"', sheet)))
             for header in writer.HEADERS:
                 self.assertIn(header, shared)
@@ -117,6 +124,25 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn('<c r="G2"/>', sheet)
             self.assertIn('<c r="G3"/>', sheet)
             self.assertIn(f'name="{writer.SHEET_NAME}"', workbook)
+            self.assertIn(f'name="{writer.SUMMARY_SHEET_NAME}"', workbook)
+            self.assertIn(writer.SUMMARY_TITLE, shared)
+            self.assertIn('<c r="B4" s="4"><v>2</v></c>', summary_sheet)
+            self.assertIn('<c r="B5" s="4"><v>1</v></c>', summary_sheet)
+            self.assertIn('<c r="B6" s="4"><v>1</v></c>', summary_sheet)
+            self.assertIn("Mysql", shared)
+            self.assertIn("未识别", shared)
+            self.assertIn("BUS-003", shared)
+            self.assertIn("BUS-006", shared)
+            self.assertIn('Target="worksheets/sheet2.xml"', relationships)
+            self.assertIn('PartName="/xl/worksheets/sheet2.xml"', content_types)
+            self.assertIn("<vt:i4>2</vt:i4>", app_properties)
+            self.assertIn(writer.SUMMARY_SHEET_NAME, app_properties)
+
+    def test_summary_counts_empty_results(self):
+        summary = writer.build_summary([])
+        self.assertEqual([("SQL 总数", 0), ("通过数", 0), ("不通过数", 0)], summary["metrics"])
+        self.assertEqual([], summary["database_types"])
+        self.assertEqual([], summary["rules"])
 
     def test_rule_reference_contains_thirteen_rules(self):
         with open(os.path.join(ROOT, "references", "rule.md"), encoding="utf-8") as handle:
