@@ -9,7 +9,7 @@ All complete SQL is in scope regardless of whether it appears under mapper, migr
 ## Decisions
 
 - Use a skill plus deterministic Python helpers rather than prompt-only file handling or a full SQL AST dependency.
-- Bundle copies of `docs/rule.md` and `docs/SQL审核结果模板.xlsx` inside the skill so execution does not depend on the caller's working directory.
+- Bundle copies of `docs/rule.md` and the approved `sql-audit/assets/应用代码扫描结果模板.xlsx` inside the skill so execution does not depend on the caller's working directory.
 - Native archive support: ZIP, JAR, WAR, EAR, TAR, TAR.GZ, and TGZ. 7Z/RAR are optional when an appropriate system extractor is available.
 - Apply path-traversal and archive-bomb safeguards during extraction.
 - Scan supported source/config text formats with format-aware extraction and a generic text fallback. Skip `.class` and binary files.
@@ -40,7 +40,7 @@ Planned skill layout:
 sql-audit/
 |-- SKILL.md
 |-- references/rule.md
-|-- assets/SQL审核结果模板.xlsx
+|-- assets/应用代码扫描结果模板.xlsx
 `-- scripts/
     |-- extract_sql.py
     `-- write_report.py
