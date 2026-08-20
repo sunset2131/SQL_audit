@@ -16,7 +16,8 @@ Use this skill for a code archive that may contain SQL. The final deliverable is
 - Supported native archives are ZIP/JAR/WAR/EAR/TAR/TAR.GZ/TGZ. Use 7z/RAR only when the matching system tool exists.
 - Process every nested archive up to the helper's safety limits, including archives under dependency locations such as `BOOT-INF/lib` and `WEB-INF/lib`; preserve the full nested source path.
 - Keep every SQL occurrence. Do not deduplicate identical statements.
-- Every SQL occurrence becomes one row in the `应用代码扫描结果` worksheet. Its seven headers must be exactly `代码文件`, `目标数据库类型`, `原SQL`, `审核结果`, `存在问题`, `处理建议`, and `人工复核结果`. Add a second worksheet named `汇总信息` with SQL total, pass/fail counts, per-database counts, and counts for rules that actually matched.
+- Every SQL occurrence becomes one row in the `应用代码扫描结果` worksheet. Its seven headers must be exactly `代码文件`, `目标数据库类型`, `原SQL`, `审核结果`, `存在问题`, `处理建议`, and `人工复核结果`. The workbook must contain exactly three worksheets: `应用代码扫描结果`, `汇总信息`, and `规则列表`.
+- Write the SQL totals, pass/fail counts, per-database counts, and matched-rule counts into the existing `汇总信息` worksheet. Preserve the existing `规则列表` worksheet byte-for-byte from the approved template; do not populate, clear, reorder, or restyle it.
 - Prefer a user-supplied database type. Otherwise infer only `Oracle`, `Mysql`, `Kingbase`, `Gbase`, or `Gaussdb` from source/config/SQL evidence. If no supported type matches, leave the cell blank.
 - Any finding makes `审核结果` `不通过`, including advisory `BUS-006`.
 - Leave `人工复核结果` blank.
@@ -85,9 +86,9 @@ python <skill-dir>/scripts/write_report.py \
   --output <working-dir>/应用代码扫描结果.xlsx
 ```
 
-The writer removes the two example rows, replaces all seven headers with the exact short labels in the contract, appends one row per input record, derives `审核结果` from whether `findings` is non-empty, numbers problems and suggestions, and leaves the manual-review column empty. It also adds `汇总信息`, containing SQL total, pass/fail counts, database-type counts (blank types are shown as `未识别` only in the summary), and matched-rule counts. With zero records it writes a valid two-sheet workbook. It rejects malformed audit JSON and SQL cells longer than the Excel cell limit rather than truncating them.
+The writer removes the example data rows from the detail worksheet, replaces all seven headers with the exact short labels in the contract, appends one row per input record, derives `审核结果` from whether `findings` is non-empty, numbers problems and suggestions, and leaves the manual-review column empty. It replaces the contents of the existing `汇总信息` worksheet with SQL total, pass/fail counts, database-type counts (blank types are shown as `未识别` only in the summary), and matched-rule counts. It leaves `规则列表` untouched. With zero records it writes a valid three-sheet workbook. It rejects malformed audit JSON and SQL cells longer than the Excel cell limit rather than truncating them.
 
-The workbook's visual output is template-controlled: the writer validates the exact seven headers and copies the template's example row 3 height and per-column cell styles to every generated detail row. Style IDs are never invented by the writer, so changing the approved template is the only supported way to change report appearance.
+The workbook's visual output is template-controlled: the writer validates the three-sheet contract and exact seven headers, copies the template's example row 3 height and per-column cell styles to every generated detail row, and preserves the template's `规则列表` worksheet unchanged. Style IDs are never invented by the writer, so changing the approved template is the only supported way to change report appearance.
 
 ### 4. Report completion and limitations
 
@@ -95,4 +96,4 @@ Return the workbook path and summarize skipped files, unrecognized database type
 
 ## Quality Gate
 
-Before handing off, verify the result with the writer's `--validate` mode or by reopening the workbook with an independent spreadsheet reader. Confirm the workbook has `应用代码扫描结果` and `汇总信息`, the detail headers exactly match the contract and contain no parenthetical explanations, the number of detail rows equals the number of audit records, every detail row has an empty column G, and the summary totals reconcile with the detail rows.
+Before handing off, verify the result with the writer's `--validate` mode or by reopening the workbook with an independent spreadsheet reader. Confirm the workbook has exactly `应用代码扫描结果`, `汇总信息`, and `规则列表`, the detail headers exactly match the contract and contain no parenthetical explanations, the number of detail rows equals the number of audit records, every detail row has an empty column G, the `规则列表` worksheet is unchanged from the template, and the summary totals reconcile with the detail rows.

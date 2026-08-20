@@ -111,10 +111,9 @@ class SqlAuditTests(unittest.TestCase):
                 self.assertIsNone(archive.testzip())
                 sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
                 summary_sheet = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
+                rules_sheet = archive.read("xl/worksheets/sheet3.xml")
                 shared = archive.read("xl/sharedStrings.xml").decode("utf-8")
                 workbook = archive.read("xl/workbook.xml").decode("utf-8")
-                relationships = archive.read("xl/_rels/workbook.xml.rels").decode("utf-8")
-                content_types = archive.read("[Content_Types].xml").decode("utf-8")
                 app_properties = archive.read("docProps/app.xml").decode("utf-8")
             ElementTree.fromstring(summary_sheet)
             self.assertEqual(3, len(re.findall(r'<row\s+r="\d+"', sheet)))
@@ -125,6 +124,8 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn('<c r="G3" s="3"/>', sheet)
             self.assertIn(f'name="{writer.SHEET_NAME}"', workbook)
             self.assertIn(f'name="{writer.SUMMARY_SHEET_NAME}"', workbook)
+            self.assertIn(f'name="{writer.RULES_SHEET_NAME}"', workbook)
+            self.assertEqual(3, workbook.count("<sheet "))
             self.assertIn(writer.SUMMARY_TITLE, shared)
             self.assertIn('<c r="B4" s="4"><v>2</v></c>', summary_sheet)
             self.assertIn('<c r="B5" s="4"><v>1</v></c>', summary_sheet)
@@ -133,10 +134,12 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn("未识别", shared)
             self.assertIn("BUS-003", shared)
             self.assertIn("BUS-006", shared)
-            self.assertIn('Target="worksheets/sheet2.xml"', relationships)
-            self.assertIn('PartName="/xl/worksheets/sheet2.xml"', content_types)
-            self.assertIn("<vt:i4>2</vt:i4>", app_properties)
+            self.assertIn("<vt:i4>3</vt:i4>", app_properties)
             self.assertIn(writer.SUMMARY_SHEET_NAME, app_properties)
+            self.assertIn(writer.RULES_SHEET_NAME, app_properties)
+
+            with zipfile.ZipFile(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")) as template_archive:
+                self.assertEqual(rules_sheet, template_archive.read("xl/worksheets/sheet3.xml"))
 
             template_xml = zipfile.ZipFile(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")).read(
                 "xl/worksheets/sheet1.xml"

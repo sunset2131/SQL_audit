@@ -20,6 +20,7 @@ DEFAULT_TEMPLATE = os.path.join(
 )
 SHEET_NAME = "应用代码扫描结果"
 SUMMARY_SHEET_NAME = "汇总信息"
+RULES_SHEET_NAME = "规则列表"
 SUMMARY_TITLE = "应用代码扫描汇总"
 HEADERS = [
     "代码文件",
@@ -262,7 +263,12 @@ def update_summary_sheet(shared_indices: dict[str, int], summary: dict[str, list
     )
 
 
-def update_workbook(xml: str, relationship_id: str) -> str:
+def update_workbook(xml: str) -> str:
+    sheet_names = re.findall(r'<sheet\b[^>]*\bname="([^"]*)"', xml)
+    if sheet_names != ["审核结果", SUMMARY_SHEET_NAME, RULES_SHEET_NAME]:
+        raise ValueError(
+            "template worksheets must be 审核结果, 汇总信息, 规则列表"
+        )
     updated, count = re.subn(
         r'(<sheet\b[^>]*\bname=")[^"]*(")',
         rf'\g<1>{escape(SHEET_NAME, quote=True)}\g<2>',
@@ -271,45 +277,15 @@ def update_workbook(xml: str, relationship_id: str) -> str:
     )
     if count != 1:
         raise ValueError("template workbook does not contain a renameable worksheet")
-    if f'name="{SUMMARY_SHEET_NAME}"' in updated:
-        raise ValueError("template already contains the summary worksheet")
-    return updated.replace(
-        "</sheets>",
-        f'<sheet name="{escape(SUMMARY_SHEET_NAME, quote=True)}" sheetId="2" r:id="{relationship_id}"/></sheets>',
-        1,
-    )
-
-
-def update_workbook_relationships(xml: str) -> tuple[str, str]:
-    relationship_ids = [int(value) for value in re.findall(r'\bId="rId(\d+)"', xml)]
-    relationship_id = f"rId{max(relationship_ids, default=0) + 1}"
-    relationship = (
-        f'<Relationship Id="{relationship_id}" '
-        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
-        'Target="worksheets/sheet2.xml"/>'
-    )
-    if "worksheets/sheet2.xml" in xml:
-        raise ValueError("template already defines xl/worksheets/sheet2.xml")
-    return xml.replace("</Relationships>", relationship + "</Relationships>", 1), relationship_id
-
-
-def update_content_types(xml: str) -> str:
-    if 'PartName="/xl/worksheets/sheet2.xml"' in xml:
-        raise ValueError("template already defines a content type for summary worksheet")
-    override = (
-        '<Override PartName="/xl/worksheets/sheet2.xml" '
-        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-    )
-    return xml.replace("</Types>", override + "</Types>", 1)
+    return updated
 
 
 def update_app_properties(xml: str) -> str:
-    xml = xml.replace("<vt:i4>1</vt:i4>", "<vt:i4>2</vt:i4>", 1)
-    return re.sub(
-        r'(<TitlesOfParts><vt:vector size=")1(" baseType="lpstr"><vt:lpstr>)[^<]*(</vt:lpstr>)(</vt:vector></TitlesOfParts>)',
-        rf'\g<1>2\g<2>{SHEET_NAME}\g<3><vt:lpstr>{SUMMARY_SHEET_NAME}</vt:lpstr>\g<4>',
-        xml,
-        count=1,
+    """Keep the template's three-sheet metadata while renaming the detail tab."""
+    return xml.replace(
+        "<vt:lpstr>审核结果</vt:lpstr>",
+        f"<vt:lpstr>{escape(SHEET_NAME)}</vt:lpstr>",
+        1,
     )
 
 
@@ -326,8 +302,16 @@ def render(template: str, output: str, records: list[dict]) -> None:
     values.extend(summary_strings(summary))
     with zipfile.ZipFile(template, "r") as source:
         files = {name: source.read(name) for name in source.namelist()}
-    if "xl/worksheets/sheet1.xml" not in files or "xl/sharedStrings.xml" not in files:
-        raise ValueError("template is missing the required detail worksheet or shared strings")
+    required_files = {
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+        "xl/worksheets/sheet2.xml",
+        "xl/worksheets/sheet3.xml",
+        "xl/sharedStrings.xml",
+    }
+    missing = sorted(required_files.difference(files))
+    if missing:
+        raise ValueError(f"template is missing required files: {', '.join(missing)}")
     row_attrs, prototypes = template_prototype(
         files["xl/worksheets/sheet1.xml"].decode("utf-8"),
         files["xl/sharedStrings.xml"].decode("utf-8"),
@@ -344,14 +328,11 @@ def render(template: str, output: str, records: list[dict]) -> None:
         row_attrs,
         prototypes,
     )
-    relationships, relationship_id = update_workbook_relationships(files["xl/_rels/workbook.xml.rels"].decode("utf-8"))
-    workbook = update_workbook(files["xl/workbook.xml"].decode("utf-8"), relationship_id)
+    workbook = update_workbook(files["xl/workbook.xml"].decode("utf-8"))
     files["xl/sharedStrings.xml"] = shared.encode("utf-8")
     files["xl/worksheets/sheet1.xml"] = sheet.encode("utf-8")
     files["xl/worksheets/sheet2.xml"] = update_summary_sheet(shared_indices, summary).encode("utf-8")
     files["xl/workbook.xml"] = workbook.encode("utf-8")
-    files["xl/_rels/workbook.xml.rels"] = relationships.encode("utf-8")
-    files["[Content_Types].xml"] = update_content_types(files["[Content_Types].xml"].decode("utf-8")).encode("utf-8")
     files["docProps/app.xml"] = update_app_properties(files["docProps/app.xml"].decode("utf-8")).encode("utf-8")
     os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target:
@@ -363,12 +344,19 @@ def validate(path: str, expected_records: int) -> None:
     with zipfile.ZipFile(path) as archive:
         sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
         summary = archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
+        rules = archive.read("xl/worksheets/sheet3.xml")
         shared = archive.read("xl/sharedStrings.xml").decode("utf-8")
         workbook = archive.read("xl/workbook.xml").decode("utf-8")
     if f'name="{SHEET_NAME}"' not in workbook:
         raise ValueError(f"workbook does not contain sheet {SHEET_NAME}")
     if f'name="{SUMMARY_SHEET_NAME}"' not in workbook:
         raise ValueError(f"workbook does not contain sheet {SUMMARY_SHEET_NAME}")
+    if f'name="{RULES_SHEET_NAME}"' not in workbook:
+        raise ValueError(f"workbook does not contain sheet {RULES_SHEET_NAME}")
+    if workbook.count("<sheet ") != 3:
+        raise ValueError("workbook must contain exactly three worksheets")
+    if not rules:
+        raise ValueError("rules worksheet is empty")
     entries = re.findall(r"<si\b.*?</si>", shared, flags=re.S)
     strings = []
     for entry in entries:
@@ -385,7 +373,8 @@ def validate(path: str, expected_records: int) -> None:
     data_rows = [row for row in rows if int(row) >= 2]
     if len(data_rows) != expected_records:
         raise ValueError(f"workbook has {len(data_rows)} data rows; expected {expected_records}")
-    if f'<v>{strings.index(SUMMARY_TITLE)}</v>' not in summary:
+    title_indices = [index for index, value in enumerate(strings) if value == SUMMARY_TITLE]
+    if not any(f'<v>{index}</v>' in summary for index in title_indices):
         raise ValueError("summary worksheet title is missing")
 
 
