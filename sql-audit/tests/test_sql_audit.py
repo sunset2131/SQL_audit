@@ -91,10 +91,22 @@ class SqlAuditTests(unittest.TestCase):
                         "problem": "使用SELECT *：未明确列出所需字段。",
                         "suggestion": "只列出业务实际需要的字段。",
                     },
+                ],
+            },
+            {
+                "source": "db/migration/V001.sql",
+                "sql": "CREATE TABLE users (id BIGINT)",
+                "database_type": "Mysql",
+                "findings": [
                     {
-                        "rule_id": "BUS-006",
-                        "problem": "负向查询风险：使用了NOT，可能导致索引利用不足；位置：WHERE条件。",
-                        "suggestion": "优先改写为正向条件。",
+                        "rule_id": "BUS-001",
+                        "problem": "业务 SQL 中直接包含 DDL 语句。",
+                        "suggestion": "将结构变更移交 DBA 或运维执行。",
+                    },
+                    {
+                        "rule_id": "BUS-003",
+                        "problem": "使用 SELECT * 未显式指定查询字段。",
+                        "suggestion": "建议显式列出字段。",
                     },
                 ],
             },
@@ -106,7 +118,7 @@ class SqlAuditTests(unittest.TestCase):
                 json.dump({"records": records}, handle, ensure_ascii=False)
             loaded = writer.load_records(audit_path)
             writer.render(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx"), output_path, loaded)
-            writer.validate(output_path, 2)
+            writer.validate(output_path, 3)
             with zipfile.ZipFile(output_path) as archive:
                 self.assertIsNone(archive.testzip())
                 sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
@@ -116,24 +128,26 @@ class SqlAuditTests(unittest.TestCase):
                 workbook = archive.read("xl/workbook.xml").decode("utf-8")
                 app_properties = archive.read("docProps/app.xml").decode("utf-8")
             ElementTree.fromstring(summary_sheet)
-            self.assertEqual(3, len(re.findall(r'<row\s+r="\d+"', sheet)))
+            self.assertEqual(4, len(re.findall(r'<row\s+r="\d+"', sheet)))
             for header in writer.HEADERS:
                 self.assertIn(header, shared)
+            self.assertIn("通过", shared)
+            self.assertIn("建议", shared)
             self.assertIn("不通过", shared)
-            self.assertIn('<c r="G2" s="3"/>', sheet)
-            self.assertIn('<c r="G3" s="3"/>', sheet)
+            self.assertIn('<c r="G2" s="7"/>', sheet)
+            self.assertIn('<c r="G3" s="7"/>', sheet)
+            self.assertIn('<c r="G4" s="7"/>', sheet)
             self.assertIn(f'name="{writer.SHEET_NAME}"', workbook)
             self.assertIn(f'name="{writer.SUMMARY_SHEET_NAME}"', workbook)
             self.assertIn(f'name="{writer.RULES_SHEET_NAME}"', workbook)
             self.assertEqual(3, workbook.count("<sheet "))
             self.assertIn(writer.SUMMARY_TITLE, shared)
-            self.assertIn('<c r="B4" s="4"><v>2</v></c>', summary_sheet)
-            self.assertIn('<c r="B5" s="4"><v>1</v></c>', summary_sheet)
-            self.assertIn('<c r="B6" s="4"><v>1</v></c>', summary_sheet)
-            self.assertIn("Mysql", shared)
-            self.assertIn("未识别", shared)
+            self.assertIn('<c r="B4" s="6"><v>3</v></c>', summary_sheet)
+            self.assertIn('<c r="B5" s="6"><v>1</v></c>', summary_sheet)
+            self.assertIn('<c r="B6" s="6"><v>1</v></c>', summary_sheet)
+            self.assertIn('<c r="B7" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn("BUS-003", shared)
-            self.assertIn("BUS-006", shared)
+            self.assertIn("BUS-001", shared)
             self.assertIn("<vt:i4>3</vt:i4>", app_properties)
             self.assertIn(writer.SUMMARY_SHEET_NAME, app_properties)
             self.assertIn(writer.RULES_SHEET_NAME, app_properties)
@@ -144,25 +158,48 @@ class SqlAuditTests(unittest.TestCase):
             template_xml = zipfile.ZipFile(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")).read(
                 "xl/worksheets/sheet1.xml"
             ).decode("utf-8")
-            template_row = re.search(r'<row\s+r="3"[^>]*>.*?</row>', template_xml, flags=re.S).group(0)
-            output_row = re.search(r'<row\s+r="2"[^>]*>.*?</row>', sheet, flags=re.S).group(0)
-            for column in "ABCDEFG":
-                template_cell = re.search(rf'<c\s+r="{column}3"([^>]*)', template_row).group(1).replace(
-                    f'r="{column}3"', ""
-                ).rstrip("/")
-                output_cell = re.search(rf'<c\s+r="{column}2"([^>]*)', output_row).group(1).replace(
-                    f'r="{column}2"', ""
-                ).rstrip("/")
-                self.assertEqual(
-                    re.sub(r'\s+t="s"', "", output_cell),
-                    re.sub(r'\s+t="s"', "", template_cell),
-                )
+            for row_number in (2, 3, 4):
+                template_style = re.search(rf'<c\s+r="D{row_number}"[^>]*\bs="(\d+)"', template_xml).group(1)
+                output_style = re.search(rf'<c\s+r="D{row_number}"[^>]*\bs="(\d+)"', sheet).group(1)
+                self.assertEqual(template_style, output_style)
+
+            strings = writer.read_shared_strings(shared)
+            self.assertEqual("通过", writer.shared_cell_value(sheet, "D2", strings))
+            self.assertEqual("建议", writer.shared_cell_value(sheet, "D3", strings))
+            self.assertEqual("不通过", writer.shared_cell_value(sheet, "D4", strings))
 
     def test_summary_counts_empty_results(self):
-        summary = writer.build_summary([])
-        self.assertEqual([("SQL 总数", 0), ("通过数", 0), ("不通过数", 0)], summary["metrics"])
-        self.assertEqual([], summary["database_types"])
+        summary = writer.build_summary([], {"BUS-001": "硬性"})
+        self.assertEqual(
+            [("SQL 总数", 0), ("通过数", 0), ("建议数", 0), ("不通过数", 0)],
+            summary["metrics"],
+        )
         self.assertEqual([], summary["rules"])
+
+    def test_rule_levels_come_from_template(self):
+        template = os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")
+        with zipfile.ZipFile(template) as archive:
+            levels = writer.read_rule_levels(
+                archive.read("xl/worksheets/sheet3.xml").decode("utf-8"),
+                archive.read("xl/sharedStrings.xml").decode("utf-8"),
+            )
+        self.assertEqual("硬性", levels["BUS-001"])
+        self.assertEqual("建议", levels["BUS-003"])
+        self.assertEqual("建议", levels["BUS-014"])
+
+    def test_writer_rejects_finding_absent_from_template(self):
+        records = [{
+            "source": "mapper/User.xml",
+            "sql": "SELECT id FROM users",
+            "findings": [{"rule_id": "BUS-999", "problem": "x", "suggestion": "y"}],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "BUS-999"):
+                writer.render(
+                    os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx"),
+                    os.path.join(directory, "result.xlsx"),
+                    records,
+                )
 
     def test_rule_reference_contains_thirteen_rules(self):
         with open(os.path.join(ROOT, "references", "rule.md"), encoding="utf-8") as handle:
