@@ -46,6 +46,12 @@ STRING_RE = re.compile(
     re.S,
 )
 XML_SQL_RE = re.compile(r"<(?P<tag>select|insert|update|delete|sql)\b[^>]*>(?P<body>.*?)</(?P=tag)\s*>", re.I | re.S)
+XML_SQL_FRAGMENT_RE = re.compile(
+    r"<sql\b(?P<attrs>[^>]*)>(?P<body>.*?)</sql\s*>", re.I | re.S
+)
+XML_INCLUDE_RE = re.compile(
+    r"<include\b(?P<attrs>[^>]*)/?>", re.I | re.S
+)
 
 
 class ExtractionError(RuntimeError):
@@ -189,6 +195,33 @@ def strip_xml_tags(value: str) -> str:
     return re.sub(r"<(/?)(if|choose|when|otherwise|foreach|where|trim|set)\b[^>]*>", r" /* <\1\2> */ ", value, flags=re.I)
 
 
+def expand_xml_includes(text: str) -> str:
+    """Expand resolvable MyBatis SQL fragments while preserving unknown includes."""
+    fragments: dict[str, str] = {}
+    for match in XML_SQL_FRAGMENT_RE.finditer(text):
+        id_match = re.search(r"\bid\s*=\s*(['\"])([^'\"]+)\1", match.group("attrs"), re.I)
+        if id_match:
+            fragment_id = id_match.group(2).strip()
+            fragments[fragment_id] = match.group("body")
+            fragments.setdefault(fragment_id.rsplit(".", 1)[-1], match.group("body"))
+
+    def expand(value: str, stack: tuple[str, ...] = ()) -> str:
+        def replace(match: re.Match[str]) -> str:
+            attrs = match.group("attrs")
+            ref_match = re.search(r"\brefid\s*=\s*(['\"])([^'\"]+)\1", attrs, re.I)
+            if not ref_match:
+                return match.group(0)
+            refid = ref_match.group(2).strip()
+            fragment = fragments.get(refid) or fragments.get(refid.rsplit(".", 1)[-1])
+            if fragment is None or refid in stack:
+                return match.group(0)
+            return expand(fragment, stack + (refid,))
+
+        return XML_INCLUDE_RE.sub(replace, value)
+
+    return expand(text)
+
+
 def statement_parts(text: str, base_line: int) -> Iterator[tuple[str, int]]:
     """Split SQL text at semicolons outside quotes/comments."""
     start = 0
@@ -242,11 +275,14 @@ def extract_from_text(source: SourceText) -> Iterator[dict]:
     text = source.text
     lower = source.path.lower()
     if lower.endswith(".xml"):
-        matches = list(XML_SQL_RE.finditer(text))
+        expanded_text = expand_xml_includes(text)
+        matches = list(XML_SQL_RE.finditer(expanded_text))
         for match in matches:
+            if match.group("tag").lower() == "sql":
+                continue
             value = strip_xml_tags(match.group("body")).strip()
             if likely_sql(value):
-                yield {"sql": value, "line": text.count("\n", 0, match.start()) + 1, "extractor": "xml"}
+                yield {"sql": value, "line": expanded_text.count("\n", 0, match.start()) + 1, "extractor": "xml"}
         # XML may contain SQL in attributes or non-MyBatis nodes; continue with literals.
     if lower.endswith(".sql"):
         for value, line in statement_parts(text, 1):

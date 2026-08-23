@@ -66,7 +66,14 @@ def load_records(path: str) -> list[dict]:
 
 
 def numbered(records: list[dict], field: str, separator: str) -> str:
-    values = [str(item[field]).strip() for item in records if str(item.get(field, "")).strip()]
+    values = []
+    for item in records:
+        value = str(item.get(field, "")).strip()
+        if not value:
+            continue
+        if field == "problem":
+            value = f"{value}【{item['level']}】"
+        values.append(value)
     return separator.join(f"{idx}. {value}" for idx, value in enumerate(values, 1)) if values else "无"
 
 
@@ -139,6 +146,10 @@ def read_rule_catalog(rules_xml: str, shared_xml: str) -> dict[str, dict[str, st
         raise ValueError("template rules worksheet column A must be 规则编号")
     if shared_cell_value(rules_xml, "C1", strings) != "规则级别":
         raise ValueError("template rules worksheet column C must be 规则级别")
+    if shared_cell_value(rules_xml, "F1", strings) != "规则内容":
+        raise ValueError("template rules worksheet column F must be 规则内容")
+    if shared_cell_value(rules_xml, "G1", strings) != "审核方式":
+        raise ValueError("template rules worksheet column G must be 审核方式")
     if shared_cell_value(rules_xml, "H1", strings) != "存在问题":
         raise ValueError("template rules worksheet column H must be 存在问题")
     if shared_cell_value(rules_xml, "I1", strings) != "处理建议":
@@ -156,6 +167,8 @@ def read_rule_catalog(rules_xml: str, shared_xml: str) -> dict[str, dict[str, st
             raise ValueError(f"template rules worksheet contains duplicate rule {rule_id}")
         catalog[rule_id] = {
             "level": level,
+            "rule_content": shared_cell_value(rules_xml, f"F{row_number}", strings),
+            "audit_method": shared_cell_value(rules_xml, f"G{row_number}", strings),
             "problem": shared_cell_value(rules_xml, f"H{row_number}", strings),
             "suggestion": shared_cell_value(rules_xml, f"I{row_number}", strings),
             "order": len(catalog),
@@ -180,6 +193,7 @@ def canonical_findings(record: dict, rule_catalog: dict[str, dict[str, str | int
         rule = rule_catalog[rule_id]
         findings.append({
             "rule_id": rule_id,
+            "level": str(rule["level"]),
             "problem": str(rule["problem"]),
             "suggestion": str(rule["suggestion"]),
         })
@@ -501,10 +515,18 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
                 match = re.fullmatch(rf"{expected_number}\.\s(.+)", part)
                 if not match:
                     raise ValueError(f"row {row_number} {field} text is not strictly numbered")
+                problem_text = match.group(1)
+                level = None
+                if field == "problem":
+                    level_match = re.fullmatch(r"(.+)【(硬性|建议)】", problem_text)
+                    if not level_match:
+                        raise ValueError(f"row {row_number} problem text is missing its rule level")
+                    problem_text, level = level_match.groups()
                 matching_orders = [
                     int(rule["order"])
                     for rule in rule_catalog.values()
-                    if match.group(1) == str(rule[field])
+                    if problem_text == str(rule[field])
+                    and (level is None or level == str(rule["level"]))
                 ]
                 if len(matching_orders) != 1:
                     raise ValueError(f"row {row_number} {field} contains text outside the template rules")

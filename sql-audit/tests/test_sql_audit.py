@@ -73,6 +73,35 @@ class SqlAuditTests(unittest.TestCase):
         self.assertEqual("Mysql", java_record["database_type"])
         self.assertTrue(any(record["database_type"] == "" for record in result["records"]))
 
+    def test_xml_include_fragments_are_expanded_without_emitting_fragment_rows(self):
+        source = extractor.SourceText(
+            "mapper/AlarmMapper.xml",
+            """
+            <mapper>
+              <sql id="conditionSql">WHERE alarm_id = #{alarmId} AND status = #{status,jdbcType=VARCHAR}</sql>
+              <update id="updateAlarm">
+                UPDATE alarm SET alarm_count = alarm_count + 1
+                <include refid="conditionSql"/>
+              </update>
+            </mapper>
+            """,
+            0,
+        )
+        records = list(extractor.extract_from_text(source))
+        self.assertEqual(1, len(records))
+        self.assertIn("WHERE alarm_id = #{alarmId}", records[0]["sql"])
+        self.assertIn("status = #{status,jdbcType=VARCHAR}", records[0]["sql"])
+
+    def test_mybatis_binding_placeholder_is_preserved_in_extracted_sql(self):
+        source = extractor.SourceText(
+            "mapper/UserMapper.xml",
+            '<mapper><select id="find">SELECT id FROM users WHERE id = #{item}</select></mapper>',
+            0,
+        )
+        records = list(extractor.extract_from_text(source))
+        self.assertEqual(1, len(records))
+        self.assertIn("#{item}", records[0]["sql"])
+
     def test_writer_preserves_contract(self):
         records = [
             {
@@ -149,9 +178,9 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn('<c r="B5" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn('<c r="B6" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn('<c r="B7" s="6"><v>1</v></c>', summary_sheet)
-            self.assertIn("1. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。", shared)
+            self.assertIn("1. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。【建议】；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。【建议】", shared)
             self.assertIn("1. 建议将 SELECT * 改为显式列出实际需要的字段名。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。", shared)
-            self.assertIn("1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。", shared)
+            self.assertIn("1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。【硬性】；2. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。【建议】", shared)
             self.assertIn("1. 去除 DDL 语句，将结构变更操作移交 DBA 或运维通过变更流程执行；如确需清理数据，改用 DELETE 并分批提交。\n2. 建议将 SELECT * 改为显式列出实际需要的字段名。", shared)
             self.assertIn("<vt:i4>3</vt:i4>", app_properties)
             self.assertIn(writer.SUMMARY_SHEET_NAME, app_properties)
@@ -245,12 +274,35 @@ class SqlAuditTests(unittest.TestCase):
                 strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
             self.assertEqual("不通过", writer.shared_cell_value(sheet, "D2", strings))
             self.assertEqual(
-                "1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。",
+                "1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。【硬性】；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。【建议】",
                 writer.shared_cell_value(sheet, "E2", strings),
             )
             self.assertEqual(
                 "1. 去除 DDL 语句，将结构变更操作移交 DBA 或运维通过变更流程执行；如确需清理数据，改用 DELETE 并分批提交。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。",
                 writer.shared_cell_value(sheet, "F2", strings),
+            )
+
+    def test_bus002_template_text_supports_select_without_where(self):
+        records = [{
+            "source": "mapper/GroupMapper.xml",
+            "sql": "SELECT * FROM snc_chat_group",
+            "findings": [{"rule_id": "BUS-002"}, {"rule_id": "BUS-003"}],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = os.path.join(directory, "result.xlsx")
+            writer.render(
+                os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx"),
+                output_path,
+                records,
+            )
+            writer.validate(output_path, 1)
+            with zipfile.ZipFile(output_path) as archive:
+                sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
+            self.assertEqual("不通过", writer.shared_cell_value(sheet, "D2", strings))
+            self.assertEqual(
+                "1. SELECT、DELETE/UPDATE 缺少有效 WHERE 条件，可能导致全表扫描或对全表执行删除、更新操作。【硬性】；2. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。【建议】",
+                writer.shared_cell_value(sheet, "E2", strings),
             )
 
     def test_rule_reference_contains_fourteen_rules(self):

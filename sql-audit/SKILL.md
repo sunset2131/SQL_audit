@@ -62,12 +62,15 @@ Create an audit JSON file with this shape:
 }
 ```
 
-Use only the exact `存在问题` and `处理建议` text from the matching row in the template's `规则列表` (columns H and I). Do not copy model-written wording from the audit JSON, add explanations, append evidence, or lengthen either field. The audit JSON may provide only `rule_id`; the writer fills the two output fields from the template. Keep findings in template rule order and report each rule at most once per SQL.
+Use only the exact `存在问题` and `处理建议` text from the matching row in the template's `规则列表` (columns H and I). For `存在问题` only, append the matching rule level immediately after the template text as `【硬性】` or `【建议】`; do not add any other wording. Keep `处理建议` exactly equal to the template text. Do not copy model-written wording from the audit JSON, add explanations, append evidence, or lengthen either field. The audit JSON may provide only `rule_id`; the writer fills the two output fields from the template. Keep findings in template rule order and report each rule at most once per SQL.
 
 Important interpretations:
 
 - A finding's output severity is controlled by the matching rule level in the approved template. The audit JSON does not need to duplicate that level.
-- When one SQL matches several rules, number `存在问题` as `1. ...；2. ...；3. ...` and number `处理建议` as `1. ...\n2. ...\n3. ...`, preserving the template rule order. With no findings, write `无` in both fields.
+- When one SQL matches several rules, number `存在问题` as `1. <template problem>【硬性/建议】；2. <template problem>【硬性/建议】` and number `处理建议` as `1. ...\n2. ...`, preserving the template rule order. With no findings, write `无` in both fields.
+- Audit every SQL against all 14 rules before writing findings. Do not stop after the first match. In particular, a `SELECT *` statement can also match `BUS-002` when its effective WHERE is absent, `BUS-004` for hard-coded values, and/or `BUS-006` for negative predicates; a `DELETE` or `UPDATE` can also match `BUS-002` when its effective WHERE is absent or only `WHERE 1=1`.
+- Treat `?`, `:name`, `$1`, and MyBatis `#{item}` or `#{object.property}` (including optional type metadata after a comma) as bound placeholders for `BUS-004`. Do not report these as hard-coded constants. MyBatis `${item}` is string substitution, not a bound placeholder, and remains subject to `BUS-004` when it represents a business value.
+- For MyBatis XML, inspect expanded `<include refid="..."/>` fragments. The extractor expands fragments defined in the same XML file; if an include or dynamic branch cannot be resolved, preserve it in the SQL and do not assume that it supplies a valid WHERE condition. Under the approved BUS-002 text, `SELECT`, `DELETE`, and `UPDATE` without an effective WHERE are findings; use the exact BUS-002 template wording in the report.
 - Complete DDL statements remain in the population and are evaluated against `BUS-001`; do not remove them before auditing.
 - `BUS-004` concerns business parameters and bound placeholders. Do not claim a literal is a violation when it is a structural SQL keyword, a type-safe SQL clause, or a clearly non-business constant. Use the evidence only to make the internal decision; never append it to `存在问题` or `处理建议`.
 - For dynamic SQL, preserve the original dynamic structure. If the full statement cannot be recovered, omit it and report the source path and reason outside the workbook.
