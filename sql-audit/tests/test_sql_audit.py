@@ -88,8 +88,11 @@ class SqlAuditTests(unittest.TestCase):
                 "findings": [
                     {
                         "rule_id": "BUS-003",
-                        "problem": "使用SELECT *：未明确列出所需字段。",
-                        "suggestion": "只列出业务实际需要的字段。",
+                        "problem": "模型自行补充的错误问题文本",
+                        "suggestion": "模型自行补充的错误建议文本",
+                    },
+                    {
+                        "rule_id": "BUS-006",
                     },
                 ],
             },
@@ -146,8 +149,10 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn('<c r="B5" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn('<c r="B6" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn('<c r="B7" s="6"><v>1</v></c>', summary_sheet)
-            self.assertIn("BUS-003", shared)
-            self.assertIn("BUS-001", shared)
+            self.assertIn("1. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。", shared)
+            self.assertIn("1. 建议将 SELECT * 改为显式列出实际需要的字段名。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。", shared)
+            self.assertIn("1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。", shared)
+            self.assertIn("1. 去除 DDL 语句，将结构变更操作移交 DBA 或运维通过变更流程执行；如确需清理数据，改用 DELETE 并分批提交。\n2. 建议将 SELECT * 改为显式列出实际需要的字段名。", shared)
             self.assertIn("<vt:i4>3</vt:i4>", app_properties)
             self.assertIn(writer.SUMMARY_SHEET_NAME, app_properties)
             self.assertIn(writer.RULES_SHEET_NAME, app_properties)
@@ -169,7 +174,7 @@ class SqlAuditTests(unittest.TestCase):
             self.assertEqual("不通过", writer.shared_cell_value(sheet, "D4", strings))
 
     def test_summary_counts_empty_results(self):
-        summary = writer.build_summary([], {"BUS-001": "硬性"})
+        summary = writer.build_summary([], {"BUS-001": {"level": "硬性", "problem": "x", "suggestion": "y", "order": 0}})
         self.assertEqual(
             [("SQL 总数", 0), ("通过数", 0), ("建议数", 0), ("不通过数", 0)],
             summary["metrics"],
@@ -187,6 +192,23 @@ class SqlAuditTests(unittest.TestCase):
         self.assertEqual("建议", levels["BUS-003"])
         self.assertEqual("建议", levels["BUS-014"])
 
+    def test_rule_catalog_contains_exact_output_text(self):
+        template = os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")
+        with zipfile.ZipFile(template) as archive:
+            catalog = writer.read_rule_catalog(
+                archive.read("xl/worksheets/sheet3.xml").decode("utf-8"),
+                archive.read("xl/sharedStrings.xml").decode("utf-8"),
+            )
+        self.assertEqual(14, len(catalog))
+        self.assertEqual(
+            "使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。",
+            catalog["BUS-003"]["problem"],
+        )
+        self.assertEqual(
+            "为条件列创建合适的索引，或调整查询条件以利用现有索引；若无法确认索引情况，请补充数据模型后重新审核。",
+            catalog["BUS-014"]["suggestion"],
+        )
+
     def test_writer_rejects_finding_absent_from_template(self):
         records = [{
             "source": "mapper/User.xml",
@@ -201,11 +223,41 @@ class SqlAuditTests(unittest.TestCase):
                     records,
                 )
 
-    def test_rule_reference_contains_thirteen_rules(self):
+    def test_writer_orders_findings_and_prefers_hard_rule(self):
+        records = [{
+            "source": "mapper/User.xml",
+            "sql": "SELECT * FROM users WHERE id != ?",
+            "findings": [
+                {"rule_id": "BUS-006", "problem": "wrong", "suggestion": "wrong"},
+                {"rule_id": "BUS-001"},
+            ],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = os.path.join(directory, "result.xlsx")
+            writer.render(
+                os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx"),
+                output_path,
+                records,
+            )
+            writer.validate(output_path, 1)
+            with zipfile.ZipFile(output_path) as archive:
+                sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
+            self.assertEqual("不通过", writer.shared_cell_value(sheet, "D2", strings))
+            self.assertEqual(
+                "1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。",
+                writer.shared_cell_value(sheet, "E2", strings),
+            )
+            self.assertEqual(
+                "1. 去除 DDL 语句，将结构变更操作移交 DBA 或运维通过变更流程执行；如确需清理数据，改用 DELETE 并分批提交。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。",
+                writer.shared_cell_value(sheet, "F2", strings),
+            )
+
+    def test_rule_reference_contains_fourteen_rules(self):
         with open(os.path.join(ROOT, "references", "rule.md"), encoding="utf-8") as handle:
             rules = [line for line in handle if line.strip()]
-        self.assertEqual(13, len(rules))
-        self.assertTrue(rules[-1].startswith("BUS-013\t"))
+        self.assertEqual(14, len(rules))
+        self.assertTrue(rules[-1].startswith("BUS-014\t"))
 
     def test_writer_supports_empty_results(self):
         with tempfile.TemporaryDirectory() as directory:

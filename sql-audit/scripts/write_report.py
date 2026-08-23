@@ -60,7 +60,7 @@ def load_records(path: str) -> list[dict]:
         if not isinstance(findings, list):
             raise ValueError(f"record {index} findings must be an array")
         for finding in findings:
-            if not isinstance(finding, dict) or not finding.get("rule_id") or not finding.get("problem") or not finding.get("suggestion"):
+            if not isinstance(finding, dict) or not finding.get("rule_id"):
                 raise ValueError(f"record {index} contains an invalid finding")
     return records
 
@@ -132,15 +132,19 @@ def template_prototypes(
     return pass_row_attrs, prototypes, result_prototypes
 
 
-def read_rule_levels(rules_xml: str, shared_xml: str) -> dict[str, str]:
-    """Read rule levels from columns A and C of the template's rules worksheet."""
+def read_rule_catalog(rules_xml: str, shared_xml: str) -> dict[str, dict[str, str | int]]:
+    """Read the complete rule contract from the template's rules worksheet."""
     strings = read_shared_strings(shared_xml)
     if shared_cell_value(rules_xml, "A1", strings) != "规则编号":
         raise ValueError("template rules worksheet column A must be 规则编号")
     if shared_cell_value(rules_xml, "C1", strings) != "规则级别":
         raise ValueError("template rules worksheet column C must be 规则级别")
+    if shared_cell_value(rules_xml, "H1", strings) != "存在问题":
+        raise ValueError("template rules worksheet column H must be 存在问题")
+    if shared_cell_value(rules_xml, "I1", strings) != "处理建议":
+        raise ValueError("template rules worksheet column I must be 处理建议")
 
-    levels: dict[str, str] = {}
+    catalog: dict[str, dict[str, str | int]] = {}
     for row_number in re.findall(r'<row\s+r="(\d+)"', rules_xml):
         if int(row_number) < 2:
             continue
@@ -148,21 +152,42 @@ def read_rule_levels(rules_xml: str, shared_xml: str) -> dict[str, str]:
         level = shared_cell_value(rules_xml, f"C{row_number}", strings).strip()
         if level not in {RULE_LEVEL_HARD, RULE_LEVEL_ADVISORY}:
             raise ValueError(f"template rule {rule_id} has unsupported level {level}")
-        if rule_id in levels:
+        if rule_id in catalog:
             raise ValueError(f"template rules worksheet contains duplicate rule {rule_id}")
-        levels[rule_id] = level
-    if not levels:
+        catalog[rule_id] = {
+            "level": level,
+            "problem": shared_cell_value(rules_xml, f"H{row_number}", strings),
+            "suggestion": shared_cell_value(rules_xml, f"I{row_number}", strings),
+            "order": len(catalog),
+        }
+    if not catalog:
         raise ValueError("template rules worksheet contains no rules")
-    return levels
+    return catalog
 
 
-def audit_result(record: dict, rule_levels: dict[str, str]) -> str:
-    levels = []
+def read_rule_levels(rules_xml: str, shared_xml: str) -> dict[str, str]:
+    """Return only rule levels for callers that need the compact view."""
+    return {rule_id: str(rule["level"]) for rule_id, rule in read_rule_catalog(rules_xml, shared_xml).items()}
+
+
+def canonical_findings(record: dict, rule_catalog: dict[str, dict[str, str | int]]) -> list[dict[str, str]]:
+    """Replace model-provided wording with the exact template rule wording."""
+    findings: list[dict[str, str]] = []
     for finding in record.get("findings", []):
         rule_id = str(finding["rule_id"])
-        if rule_id not in rule_levels:
+        if rule_id not in rule_catalog:
             raise ValueError(f"finding references rule {rule_id}, which is absent from the template")
-        levels.append(rule_levels[rule_id])
+        rule = rule_catalog[rule_id]
+        findings.append({
+            "rule_id": rule_id,
+            "problem": str(rule["problem"]),
+            "suggestion": str(rule["suggestion"]),
+        })
+    return sorted(findings, key=lambda finding: int(rule_catalog[finding["rule_id"]]["order"]))
+
+
+def audit_result(record: dict, rule_catalog: dict[str, dict[str, str | int]]) -> str:
+    levels = [str(rule_catalog[finding["rule_id"]]["level"]) for finding in canonical_findings(record, rule_catalog)]
     if RULE_LEVEL_HARD in levels:
         return RESULT_FAIL
     if RULE_LEVEL_ADVISORY in levels:
@@ -186,12 +211,12 @@ def update_shared_strings(xml: str, values: list[str]) -> tuple[str, list[int]]:
     return xml, list(range(existing, existing + len(values)))
 
 
-def build_summary(records: list[dict], rule_levels: dict[str, str]) -> dict[str, list[tuple[str, int]]]:
+def build_summary(records: list[dict], rule_catalog: dict[str, dict[str, str | int]]) -> dict[str, list[tuple[str, int]]]:
     rule_counts: dict[str, int] = {}
     result_counts = {RESULT_PASS: 0, RESULT_ADVISORY: 0, RESULT_FAIL: 0}
     for record in records:
-        result_counts[audit_result(record, rule_levels)] += 1
-        findings = record.get("findings", [])
+        result_counts[audit_result(record, rule_catalog)] += 1
+        findings = canonical_findings(record, rule_catalog)
         for finding in findings:
             rule_id = str(finding["rule_id"])
             rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
@@ -363,14 +388,15 @@ def render(template: str, output: str, records: list[dict]) -> None:
     if missing:
         raise ValueError(f"template is missing required files: {', '.join(missing)}")
     shared_xml = files["xl/sharedStrings.xml"].decode("utf-8")
-    rule_levels = read_rule_levels(
+    rule_catalog = read_rule_catalog(
         files["xl/worksheets/sheet3.xml"].decode("utf-8"),
         shared_xml,
     )
-    results = [audit_result(record, rule_levels) for record in records]
-    summary = build_summary(records, rule_levels)
+    canonical_records = [dict(record, findings=canonical_findings(record, rule_catalog)) for record in records]
+    results = [audit_result(record, rule_catalog) for record in canonical_records]
+    summary = build_summary(canonical_records, rule_catalog)
     values = list(HEADERS)
-    for record, result in zip(records, results):
+    for record, result in zip(canonical_records, results):
         values.extend([
             record["source"], record.get("database_type", "") or "", record["sql"],
             result,
@@ -390,7 +416,7 @@ def render(template: str, output: str, records: list[dict]) -> None:
     sheet = update_sheet(
         files["xl/worksheets/sheet1.xml"].decode("utf-8"),
         shared_indices,
-        records,
+        canonical_records,
         results,
         row_attrs,
         prototypes,
@@ -423,6 +449,7 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
         template_sheet = template_archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
         template_rules = template_archive.read("xl/worksheets/sheet3.xml")
         template_shared = template_archive.read("xl/sharedStrings.xml").decode("utf-8")
+    rule_catalog = read_rule_catalog(template_rules.decode("utf-8"), template_shared)
     _, _, result_prototypes = template_prototypes(template_sheet, template_shared)
     if f'name="{SHEET_NAME}"' not in workbook:
         raise ValueError(f"workbook does not contain sheet {SHEET_NAME}")
@@ -458,6 +485,35 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
         result_attrs = cell_attributes(row_match.group(0), f"D{row_number}")
         if result_attrs != result_prototypes[result]:
             raise ValueError(f"row {row_number} audit-result style does not match {result}")
+        numbered_rule_orders: dict[str, list[int]] = {}
+        for column, field in (("E", "problem"), ("F", "suggestion")):
+            value = shared_cell_value(sheet, f"{column}{row_number}", strings)
+            if value == "无":
+                if result != RESULT_PASS:
+                    raise ValueError(f"row {row_number} has no {field} text despite findings")
+                numbered_rule_orders[field] = []
+                continue
+            if result == RESULT_PASS:
+                raise ValueError(f"row {row_number} has {field} text without findings")
+            parts = re.split(r"(?:；|\n)(?=\d+\.\s)", value)
+            orders: list[int] = []
+            for expected_number, part in enumerate(parts, 1):
+                match = re.fullmatch(rf"{expected_number}\.\s(.+)", part)
+                if not match:
+                    raise ValueError(f"row {row_number} {field} text is not strictly numbered")
+                matching_orders = [
+                    int(rule["order"])
+                    for rule in rule_catalog.values()
+                    if match.group(1) == str(rule[field])
+                ]
+                if len(matching_orders) != 1:
+                    raise ValueError(f"row {row_number} {field} contains text outside the template rules")
+                orders.append(matching_orders[0])
+            if orders != sorted(orders):
+                raise ValueError(f"row {row_number} {field} rules are not in template order")
+            numbered_rule_orders[field] = orders
+        if numbered_rule_orders["problem"] != numbered_rule_orders["suggestion"]:
+            raise ValueError(f"row {row_number} problem and suggestion rules do not correspond")
         manual_cell = re.search(rf'<c\s+r="G{row_number}"(?:\s|/|>)', row_match.group("body"))
         manual_value = re.search(
             rf'<c\s+r="G{row_number}"[^>]*>.*?<v>',

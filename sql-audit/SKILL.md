@@ -42,7 +42,7 @@ Treat the extractor output as the full audit population. Remove a candidate only
 
 ### 2. Audit candidates using only the rules
 
-Read `references/rule.md` completely before auditing. For each candidate, apply every rule present in that file and do not substitute or add other rules.
+Read `references/rule.md` completely before auditing. The bundled rule reference mirrors the approved template's 14 rules. Apply every rule present there and do not substitute, weaken, or add other rules. The template's `规则列表` is the runtime authority for each rule's level, exact `存在问题` text, exact `处理建议` text, and rule order.
 
 Create an audit JSON file with this shape:
 
@@ -55,24 +55,21 @@ Create an audit JSON file with this shape:
       "sql": "SELECT id FROM user WHERE name = :name",
       "database_type": "Mysql",
       "findings": [
-        {
-          "rule_id": "BUS-006",
-          "problem": "负向查询风险：使用了NOT IN，可能导致索引利用不足；位置：WHERE条件。",
-          "suggestion": "优先改写为正向条件；无法改写时补充执行计划、数据量和业务必要性供二次确认。"
-        }
+        {"rule_id": "BUS-006"}
       ]
     }
   ]
 }
 ```
 
-Use the rule's prescribed problem and suggestion wording, replacing only placeholders such as `<operator>`, `<function>`, and concrete contradiction descriptions. Keep findings in rule order and do not report the same rule twice for one SQL unless distinct violations are necessary to explain the statement.
+Use only the exact `存在问题` and `处理建议` text from the matching row in the template's `规则列表` (columns H and I). Do not copy model-written wording from the audit JSON, add explanations, append evidence, or lengthen either field. The audit JSON may provide only `rule_id`; the writer fills the two output fields from the template. Keep findings in template rule order and report each rule at most once per SQL.
 
 Important interpretations:
 
 - A finding's output severity is controlled by the matching rule level in the approved template. The audit JSON does not need to duplicate that level.
+- When one SQL matches several rules, number `存在问题` as `1. ...；2. ...；3. ...` and number `处理建议` as `1. ...\n2. ...\n3. ...`, preserving the template rule order. With no findings, write `无` in both fields.
 - Complete DDL statements remain in the population and are evaluated against `BUS-001`; do not remove them before auditing.
-- `BUS-004` concerns business parameters and bound placeholders. Do not claim a literal is a violation when it is a structural SQL keyword, a type-safe SQL clause, or a clearly non-business constant; explain the evidence.
+- `BUS-004` concerns business parameters and bound placeholders. Do not claim a literal is a violation when it is a structural SQL keyword, a type-safe SQL clause, or a clearly non-business constant. Use the evidence only to make the internal decision; never append it to `存在问题` or `处理建议`.
 - For dynamic SQL, preserve the original dynamic structure. If the full statement cannot be recovered, omit it and report the source path and reason outside the workbook.
 - Do not treat extraction failures as SQL-rule findings.
 
@@ -87,7 +84,7 @@ python <skill-dir>/scripts/write_report.py \
   --output <working-dir>/应用代码扫描结果.xlsx
 ```
 
-The writer removes the three example data rows from the detail worksheet and uses them as the green, yellow, and red style prototypes. It appends one row per input record, resolves each finding's level from the template's `规则列表`, applies hard-over-advisory precedence, numbers problems and suggestions, and leaves the manual-review column empty. It replaces the contents of the existing `汇总信息` worksheet with SQL total, pass/advisory/fail counts and matched-rule counts. It leaves `规则列表` untouched. With zero records it writes a valid three-sheet workbook. It rejects malformed audit JSON, findings whose rule ID is absent from the template, and SQL cells longer than the Excel cell limit rather than truncating them.
+The writer removes the three example data rows from the detail worksheet and uses them as the green, yellow, and red style prototypes. It appends one row per input record, resolves each finding's level and exact problem/suggestion text from the template's `规则列表`, discards any model-supplied problem/suggestion wording, applies hard-over-advisory precedence, numbers multiple findings in rule order, and leaves the manual-review column empty. It replaces the contents of the existing `汇总信息` worksheet with SQL total, pass/advisory/fail counts and matched-rule counts. It leaves `规则列表` untouched. With zero records it writes a valid three-sheet workbook. It rejects malformed audit JSON, findings whose rule ID is absent from the template, output text outside the template rule vocabulary, and SQL cells longer than the Excel cell limit rather than truncating them.
 
 The workbook's visual output is template-controlled: the writer validates the three-sheet contract, exact seven headers, the three result-style prototypes, and the `规则编号`/`规则级别` columns. It copies the template's normal cell styles plus the matching green/yellow/red result style to every generated detail row, retains the summary sheet's template styles, and preserves the template's `规则列表` worksheet unchanged. Style IDs are never invented by the writer, so changing the approved template is the supported way to change report appearance.
 
@@ -97,4 +94,4 @@ Return the workbook path and summarize skipped files, unrecognized database type
 
 ## Quality Gate
 
-Before handing off, verify the result with the writer's `--validate` mode or by reopening the workbook with an independent spreadsheet reader. Confirm the workbook has exactly `应用代码扫描结果`, `汇总信息`, and `规则列表`; the detail headers exactly match the contract; each result is `通过`, `建议`, or `不通过` with the template's green, yellow, or red style; the number of detail rows equals the number of audit records; every detail row has an empty column G; the `规则列表` worksheet is unchanged from the template; and the total/pass/advisory/fail summary counts reconcile with the detail rows.
+Before handing off, verify the result with the writer's `--validate` mode or by reopening the workbook with an independent spreadsheet reader. Confirm the workbook has exactly `应用代码扫描结果`, `汇总信息`, and `规则列表`; the detail headers exactly match the contract; each result is `通过`, `建议`, or `不通过` with the template's green, yellow, or red style; every non-empty `存在问题` and `处理建议` item is an exact template rule string with only the required numeric prefix; multi-rule rows are numbered in template order; the number of detail rows equals the number of audit records; every detail row has an empty column G; the `规则列表` worksheet is unchanged from the template; and the total/pass/advisory/fail summary counts reconcile with the detail rows.
