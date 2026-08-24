@@ -22,7 +22,9 @@
         "必须只调用技能目录内的 write_report.py 和固定模板生成报告；模板无效、规则页 A:I 非空校验失败、规则页内容或样式契约不匹配时停止输出。",
         "MyBatis #{item}、#{object.property} 和带 jdbcType 元数据的 #{item,jdbcType=...} 均按绑定变量处理，不命中 BUS-004；${item} 不按绑定变量处理。",
         "同一 XML 中可解析的 MyBatis <include refid=\"...\"/> 会展开后再审核；无法解析时不臆测其是否提供有效 WHERE。",
-        "BUS-002 同时适用于 SELECT、DELETE 和 UPDATE；SELECT 无有效 WHERE 时使用 BUS-002 的模板原文，不新增规则。"
+        "BUS-002 同时适用于 SELECT、DELETE 和 UPDATE；SELECT 无有效 WHERE 时使用 BUS-002 的模板原文，不新增规则。",
+        "必须在 write_report.py 前调用技能目录内的 audit_sql.py；不得由 agent 手工生成或修改 findings。",
+        "audit_sql.py 按固定 BUS-001 至 BUS-014 顺序输出唯一 rule_id，保持输入记录顺序，结果在相同输入下可重复。"
       ]
     },
     {
@@ -34,7 +36,8 @@
         "处理 TAR.GZ 输入，并为每个 SQL 出现位置输出一行。",
         "完整扫描 mapper、migration、seed、配置和源代码目录，不按路径排除完整 SQL。",
         "没有明确数据库参数时尝试按已有线索推断；无法推断时不编造值或放弃输出。",
-        "没有发现的 SQL 写绿色通过，仅有建议发现的 SQL 写黄色建议，存在硬性发现的 SQL 写红色不通过。"
+        "没有发现的 SQL 写绿色通过，仅有建议发现的 SQL 写黄色建议，存在硬性发现的 SQL 写红色不通过。",
+        "必须通过 audit_sql.py 生成审核 JSON；未提供 schema 时 BUS-014 不得被模型猜测命中，并应保留 audit_warnings。"
       ]
     },
     {
@@ -47,7 +50,8 @@
         "BOOT-INF/lib 等依赖目录内的嵌套归档也参与全量扫描，不按路径排除。",
         "migration 中的完整 DDL 和数据种子进入审核结果，DDL 按 BUS-001 判定。",
         "不把无法提取完整 SQL 的情况写成规则违规。",
-        "压缩包损坏或不受支持时不产生误导性的空结果文件。"
+        "压缩包损坏或不受支持时不产生误导性的空结果文件。",
+        "提取完成后必须运行 audit_sql.py 再运行 write_report.py，不能把跳过或提取警告改写成规则 findings。"
       ]
     }
   ]

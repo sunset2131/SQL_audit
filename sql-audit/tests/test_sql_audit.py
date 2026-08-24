@@ -23,10 +23,60 @@ def load_module(name, path):
 
 
 extractor = load_module("sql_audit_extractor", os.path.join(ROOT, "scripts", "extract_sql.py"))
+auditor = load_module("sql_audit_auditor", os.path.join(ROOT, "scripts", "audit_sql.py"))
 writer = load_module("sql_audit_writer", os.path.join(ROOT, "scripts", "write_report.py"))
 
 
 class SqlAuditTests(unittest.TestCase):
+    def test_auditor_validates_the_bundled_rule_reference(self):
+        auditor.validate_rule_reference()
+
+    def test_deterministic_auditor_matches_all_rule_families(self):
+        cases = {
+            "BUS-001": "CREATE TABLE users (id INT)",
+            "BUS-002": "SELECT * FROM users",
+            "BUS-003": "SELECT * FROM users WHERE id = #{id}",
+            "BUS-004": "SELECT id FROM users WHERE id = 42",
+            "BUS-005": "SELECT id FROM users WHERE deleted_at != NULL",
+            "BUS-006": "SELECT id FROM users WHERE status NOT IN (#{status})",
+            "BUS-007": "SELECT id FROM users WHERE status = #{a} OR status = #{b}",
+            "BUS-008": "SELECT id FROM users WHERE name LIKE '%admin'",
+            "BUS-009": "SELECT a.id FROM a JOIN b ON a.id=b.id JOIN c ON c.id=b.id JOIN d ON d.id=c.id WHERE a.id = #{id}",
+            "BUS-010": "SELECT a.id FROM a, b WHERE a.id=b.id",
+            "BUS-011": "SELECT id FROM users WHERE id = #{id} FOR UPDATE",
+            "BUS-012": "INSERT INTO users(id) VALUES " + ",".join("(#{id})" for _ in range(5001)),
+            "BUS-013": "SELECT id FROM users WHERE id = #{id} ORDER BY RAND()",
+        }
+        for rule_id, sql in cases.items():
+            self.assertIn(rule_id, auditor.audit_one(sql), sql[:100])
+        self.assertEqual([], auditor.audit_one("SELECT id FROM users WHERE id = #{id}"))
+        self.assertEqual(auditor.audit_one(cases["BUS-009"]), auditor.audit_one(cases["BUS-009"]))
+
+    def test_auditor_recognizes_mybatis_bindings_and_effective_where(self):
+        self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE id = #{item,jdbcType=BIGINT}"))
+        self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE id = :name"))
+        self.assertIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE id = ${item}"))
+        self.assertNotIn("BUS-003", auditor.audit_one("SELECT COUNT(*) FROM users WHERE id = #{id}"))
+        self.assertNotIn("BUS-006", auditor.audit_one("SELECT id FROM users WHERE deleted_at IS NOT NULL"))
+        self.assertIn("BUS-002", auditor.audit_one("SELECT * FROM users WHERE 1 = 1"))
+        self.assertNotIn("BUS-002", auditor.audit_one("SELECT * FROM users WHERE 1 = 1 AND id = #{id}"))
+        self.assertNotIn("BUS-002", auditor.audit_one("WITH active AS (SELECT id FROM users) SELECT id FROM active WHERE id = #{id}"))
+
+    def test_auditor_keeps_record_order_and_reports_bus014_without_guessing(self):
+        payload = {
+            "records": [
+                {"source": "a.sql", "sql": "SELECT id FROM users WHERE id = #{id}"},
+                {"source": "b.sql", "sql": "SELECT id FROM users WHERE status = #{status}"},
+            ],
+            "warnings": [],
+        }
+        result = auditor.audit_payload(payload)
+        self.assertEqual(["a.sql", "b.sql"], [record["source"] for record in result["records"]])
+        self.assertTrue(any(warning.get("rule") == "BUS-014" for warning in result["audit_warnings"]))
+        schema = {"tables": {"users": {"indexes": [["id"]]}}}
+        self.assertIn("BUS-014", auditor.audit_one("SELECT id FROM users WHERE status = #{status}", schema))
+        self.assertNotIn("BUS-014", auditor.audit_one("SELECT id FROM users WHERE id = #{id}", schema))
+
     def make_archive(self, directory):
         nested = os.path.join(directory, "nested.zip")
         with zipfile.ZipFile(nested, "w") as archive:
@@ -393,6 +443,21 @@ class SqlAuditTests(unittest.TestCase):
                 output_path = os.path.join(directory, "result.xlsx")
                 writer.render(reencoded_path, output_path, [])
                 writer.validate(output_path, 0, reencoded_path)
+
+    def test_shared_string_counts_remain_valid_when_digit_width_changes(self):
+        source = (
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'count="999" uniqueCount="999">'
+            + '<si><t>x</t></si>' * 999
+            + '</sst>'
+        )
+        updated, indices = writer.update_shared_strings(source, ["new"])
+        ElementTree.fromstring(updated)
+        opening = re.search(r"<sst\b[^>]*>", updated)
+        self.assertIsNotNone(opening)
+        self.assertIn('count="1000"', opening.group(0))
+        self.assertIn('uniqueCount="1000"', opening.group(0))
+        self.assertEqual([999], indices)
 
     def test_writer_rejects_an_alternate_template_path(self):
         with tempfile.TemporaryDirectory() as directory:

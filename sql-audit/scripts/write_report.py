@@ -272,12 +272,17 @@ def update_shared_strings(xml: str, values: list[str]) -> tuple[str, list[int]]:
     existing = len(re.findall(r"<si\b", xml))
     appended = "".join(shared_string_xml(value) for value in values)
     xml = xml.replace("</sst>", appended + "</sst>", 1)
-    count_match = re.search(r'\bcount="(\d+)"', xml)
-    unique_match = re.search(r'\buniqueCount="(\d+)"', xml)
-    if count_match:
-        xml = xml[:count_match.start(1)] + str(existing + len(values)) + xml[count_match.end(1):]
-    if unique_match:
-        xml = xml[:unique_match.start(1)] + str(existing + len(values)) + xml[unique_match.end(1):]
+    # Update both attributes on the current opening tag.  Do not reuse match
+    # offsets after replacing the first value: a digit-count change shifts the
+    # second attribute and can otherwise corrupt the XML quote boundary.
+    opening = re.search(r"<sst\b[^>]*>", xml)
+    if not opening:
+        raise ValueError("template has no shared string table opening tag")
+    opening_tag = opening.group(0)
+    total = existing + len(values)
+    opening_tag = re.sub(r'(\bcount=")\d+(\")', rf'\g<1>{total}\g<2>', opening_tag, count=1)
+    opening_tag = re.sub(r'(\buniqueCount=")\d+(\")', rf'\g<1>{total}\g<2>', opening_tag, count=1)
+    xml = xml[:opening.start()] + opening_tag + xml[opening.end():]
     return xml, list(range(existing, existing + len(values)))
 
 
