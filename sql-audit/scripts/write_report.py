@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -36,10 +37,32 @@ RESULT_ADVISORY = "建议"
 RESULT_FAIL = "不通过"
 RULE_LEVEL_HARD = "硬性"
 RULE_LEVEL_ADVISORY = "建议"
+RULE_HEADERS = [
+    "规则编号",
+    "规则简要说明",
+    "规则级别",
+    "适用范围",
+    "适用数据库",
+    "规则内容",
+    "审核方式",
+    "存在问题",
+    "处理建议",
+]
+EXPECTED_RULE_IDS = [f"BUS-{number:03d}" for number in range(1, 15)]
+EXPECTED_TEMPLATE_SHA256 = "83ddd7936ac986736006b48cb3f379c3d6a8a521deaec08cc8277fbc88cc47bb"
 
 
 def xml_text(value: str) -> str:
     return escape(str(value), quote=False)
+
+
+def validate_bundled_template(template: str) -> None:
+    if os.path.realpath(template) != os.path.realpath(DEFAULT_TEMPLATE):
+        raise ValueError("only the bundled approved template may be used")
+    with open(template, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    if digest != EXPECTED_TEMPLATE_SHA256:
+        raise ValueError("bundled template differs from the approved version")
 
 
 def load_records(path: str) -> list[dict]:
@@ -72,9 +95,22 @@ def numbered(records: list[dict], field: str, separator: str) -> str:
         if not value:
             continue
         if field == "problem":
-            value = f"{value}【{item['level']}】"
+            value = f"{item['rule_id']}【{item['level']}】{value}"
         values.append(value)
     return separator.join(f"{idx}. {value}" for idx, value in enumerate(values, 1)) if values else "无"
+
+
+def source_with_line(record: dict) -> str:
+    """Keep the source path visible and append the extracted SQL start line."""
+    source = str(record["source"])
+    line = record.get("line")
+    if isinstance(line, bool):
+        return source
+    try:
+        line_number = int(line)
+    except (TypeError, ValueError):
+        return source
+    return f"{source}（第{line_number}行）" if line_number > 0 else source
 
 
 def shared_string_xml(value: str) -> str:
@@ -142,18 +178,9 @@ def template_prototypes(
 def read_rule_catalog(rules_xml: str, shared_xml: str) -> dict[str, dict[str, str | int]]:
     """Read the complete rule contract from the template's rules worksheet."""
     strings = read_shared_strings(shared_xml)
-    if shared_cell_value(rules_xml, "A1", strings) != "规则编号":
-        raise ValueError("template rules worksheet column A must be 规则编号")
-    if shared_cell_value(rules_xml, "C1", strings) != "规则级别":
-        raise ValueError("template rules worksheet column C must be 规则级别")
-    if shared_cell_value(rules_xml, "F1", strings) != "规则内容":
-        raise ValueError("template rules worksheet column F must be 规则内容")
-    if shared_cell_value(rules_xml, "G1", strings) != "审核方式":
-        raise ValueError("template rules worksheet column G must be 审核方式")
-    if shared_cell_value(rules_xml, "H1", strings) != "存在问题":
-        raise ValueError("template rules worksheet column H must be 存在问题")
-    if shared_cell_value(rules_xml, "I1", strings) != "处理建议":
-        raise ValueError("template rules worksheet column I must be 处理建议")
+    actual_headers = [shared_cell_value(rules_xml, f"{column}1", strings) for column in "ABCDEFGHI"]
+    if actual_headers != RULE_HEADERS:
+        raise ValueError(f"template rules worksheet headers do not match: {actual_headers}")
 
     catalog: dict[str, dict[str, str | int]] = {}
     for row_number in re.findall(r'<row\s+r="(\d+)"', rules_xml):
@@ -165,16 +192,23 @@ def read_rule_catalog(rules_xml: str, shared_xml: str) -> dict[str, dict[str, st
             raise ValueError(f"template rule {rule_id} has unsupported level {level}")
         if rule_id in catalog:
             raise ValueError(f"template rules worksheet contains duplicate rule {rule_id}")
+        row_values = {
+            column: shared_cell_value(rules_xml, f"{column}{row_number}", strings).strip()
+            for column in "ABCDEFGHI"
+        }
+        empty_columns = [column for column, value in row_values.items() if not value]
+        if empty_columns:
+            raise ValueError(f"template rule {rule_id} has empty columns: {', '.join(empty_columns)}")
         catalog[rule_id] = {
             "level": level,
-            "rule_content": shared_cell_value(rules_xml, f"F{row_number}", strings),
-            "audit_method": shared_cell_value(rules_xml, f"G{row_number}", strings),
-            "problem": shared_cell_value(rules_xml, f"H{row_number}", strings),
-            "suggestion": shared_cell_value(rules_xml, f"I{row_number}", strings),
+            "rule_content": row_values["F"],
+            "audit_method": row_values["G"],
+            "problem": row_values["H"],
+            "suggestion": row_values["I"],
             "order": len(catalog),
         }
-    if not catalog:
-        raise ValueError("template rules worksheet contains no rules")
+    if list(catalog) != EXPECTED_RULE_IDS:
+        raise ValueError(f"template rules must contain BUS-001 through BUS-014 in order: {list(catalog)}")
     return catalog
 
 
@@ -285,7 +319,7 @@ def update_sheet(
     for offset, (record, result) in enumerate(zip(records, results), 2):
         findings = record.get("findings", [])
         values = [
-            record["source"],
+            source_with_line(record),
             record.get("database_type", "") or "",
             record["sql"],
             result,
@@ -389,6 +423,7 @@ def update_app_properties(xml: str) -> str:
 
 
 def render(template: str, output: str, records: list[dict]) -> None:
+    validate_bundled_template(template)
     with zipfile.ZipFile(template, "r") as source:
         files = {name: source.read(name) for name in source.namelist()}
     required_files = {
@@ -412,7 +447,7 @@ def render(template: str, output: str, records: list[dict]) -> None:
     values = list(HEADERS)
     for record, result in zip(canonical_records, results):
         values.extend([
-            record["source"], record.get("database_type", "") or "", record["sql"],
+            source_with_line(record), record.get("database_type", "") or "", record["sql"],
             result,
             numbered(record.get("findings", []), "problem", "；"),
             numbered(record.get("findings", []), "suggestion", "\n"),
@@ -459,10 +494,12 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
         rules = archive.read("xl/worksheets/sheet3.xml")
         shared = archive.read("xl/sharedStrings.xml").decode("utf-8")
         workbook = archive.read("xl/workbook.xml").decode("utf-8")
+        styles = archive.read("xl/styles.xml")
     with zipfile.ZipFile(template) as template_archive:
         template_sheet = template_archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
         template_rules = template_archive.read("xl/worksheets/sheet3.xml")
         template_shared = template_archive.read("xl/sharedStrings.xml").decode("utf-8")
+        template_styles = template_archive.read("xl/styles.xml")
     rule_catalog = read_rule_catalog(template_rules.decode("utf-8"), template_shared)
     _, _, result_prototypes = template_prototypes(template_sheet, template_shared)
     if f'name="{SHEET_NAME}"' not in workbook:
@@ -475,6 +512,8 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
         raise ValueError("workbook must contain exactly three worksheets")
     if rules != template_rules:
         raise ValueError("rules worksheet differs from the approved template")
+    if styles != template_styles:
+        raise ValueError("workbook styles differ from the approved template")
     strings = read_shared_strings(shared)
     actual_headers = [shared_cell_value(sheet, f"{column}1", strings) for column in "ABCDEFG"]
     if actual_headers != HEADERS:
@@ -517,15 +556,17 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
                     raise ValueError(f"row {row_number} {field} text is not strictly numbered")
                 problem_text = match.group(1)
                 level = None
+                rule_id = None
                 if field == "problem":
-                    level_match = re.fullmatch(r"(.+)【(硬性|建议)】", problem_text)
+                    level_match = re.fullmatch(r"(BUS-\d+)【(硬性|建议)】(.+)", problem_text)
                     if not level_match:
-                        raise ValueError(f"row {row_number} problem text is missing its rule level")
-                    problem_text, level = level_match.groups()
+                        raise ValueError(f"row {row_number} problem text is missing its rule ID or level")
+                    rule_id, level, problem_text = level_match.groups()
                 matching_orders = [
                     int(rule["order"])
-                    for rule in rule_catalog.values()
+                    for candidate_rule_id, rule in rule_catalog.items()
                     if problem_text == str(rule[field])
+                    and (rule_id is None or rule_id == candidate_rule_id)
                     and (level is None or level == str(rule["level"]))
                 ]
                 if len(matching_orders) != 1:
@@ -571,12 +612,11 @@ def main() -> int:
     try:
         records = load_records(args.input)
         render(args.template, args.output, records)
-        if args.validate:
-            validate(args.output, len(records), args.template)
+        validate(args.output, len(records), args.template)
     except (OSError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
         print(f"sql-audit report error: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"output": args.output, "records": len(records), "validated": args.validate}, ensure_ascii=False))
+    print(json.dumps({"output": args.output, "records": len(records), "validated": True}, ensure_ascii=False))
     return 0
 
 

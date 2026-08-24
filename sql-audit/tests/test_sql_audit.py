@@ -178,9 +178,9 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn('<c r="B5" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn('<c r="B6" s="6"><v>1</v></c>', summary_sheet)
             self.assertIn('<c r="B7" s="6"><v>1</v></c>', summary_sheet)
-            self.assertIn("1. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。【建议】；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。【建议】", shared)
+            self.assertIn("1. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。；2. BUS-006【建议】使用负向查询可能导致索引失效、全表扫描，影响查询性能。", shared)
             self.assertIn("1. 建议将 SELECT * 改为显式列出实际需要的字段名。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。", shared)
-            self.assertIn("1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。【硬性】；2. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。【建议】", shared)
+            self.assertIn("1. BUS-001【硬性】业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。", shared)
             self.assertIn("1. 去除 DDL 语句，将结构变更操作移交 DBA 或运维通过变更流程执行；如确需清理数据，改用 DELETE 并分批提交。\n2. 建议将 SELECT * 改为显式列出实际需要的字段名。", shared)
             self.assertIn("<vt:i4>3</vt:i4>", app_properties)
             self.assertIn(writer.SUMMARY_SHEET_NAME, app_properties)
@@ -201,6 +201,26 @@ class SqlAuditTests(unittest.TestCase):
             self.assertEqual("通过", writer.shared_cell_value(sheet, "D2", strings))
             self.assertEqual("建议", writer.shared_cell_value(sheet, "D3", strings))
             self.assertEqual("不通过", writer.shared_cell_value(sheet, "D4", strings))
+
+    def test_writer_preserves_sql_source_line_in_code_file_cell(self):
+        records = [{
+            "source": "mapper/UserMapper.xml",
+            "line": 42,
+            "sql": "SELECT id FROM users WHERE id = #{id}",
+            "findings": [],
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = os.path.join(directory, "result.xlsx")
+            writer.render(
+                os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx"),
+                output_path,
+                records,
+            )
+            writer.validate(output_path, 1)
+            with zipfile.ZipFile(output_path) as archive:
+                sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
+            self.assertEqual("mapper/UserMapper.xml（第42行）", writer.shared_cell_value(sheet, "A2", strings))
 
     def test_summary_counts_empty_results(self):
         summary = writer.build_summary([], {"BUS-001": {"level": "硬性", "problem": "x", "suggestion": "y", "order": 0}})
@@ -274,7 +294,7 @@ class SqlAuditTests(unittest.TestCase):
                 strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
             self.assertEqual("不通过", writer.shared_cell_value(sheet, "D2", strings))
             self.assertEqual(
-                "1. 业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。【硬性】；2. 使用负向查询可能导致索引失效、全表扫描，影响查询性能。【建议】",
+                "1. BUS-001【硬性】业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. BUS-006【建议】使用负向查询可能导致索引失效、全表扫描，影响查询性能。",
                 writer.shared_cell_value(sheet, "E2", strings),
             )
             self.assertEqual(
@@ -301,7 +321,7 @@ class SqlAuditTests(unittest.TestCase):
                 strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
             self.assertEqual("不通过", writer.shared_cell_value(sheet, "D2", strings))
             self.assertEqual(
-                "1. SELECT、DELETE/UPDATE 缺少有效 WHERE 条件，可能导致全表扫描或对全表执行删除、更新操作。【硬性】；2. 使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。【建议】",
+                "1. BUS-002【硬性】SELECT、DELETE/UPDATE 缺少有效 WHERE 条件，可能导致全表扫描或对全表执行删除、更新操作。；2. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。",
                 writer.shared_cell_value(sheet, "E2", strings),
             )
 
@@ -322,6 +342,15 @@ class SqlAuditTests(unittest.TestCase):
 
     def test_default_template_is_the_bundled_approved_template(self):
         self.assertTrue(writer.DEFAULT_TEMPLATE.endswith(os.path.join("assets", "应用代码扫描结果模板.xlsx")))
+        writer.validate_bundled_template(writer.DEFAULT_TEMPLATE)
+
+    def test_writer_rejects_an_alternate_template_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            template_copy = os.path.join(directory, "template.xlsx")
+            with open(writer.DEFAULT_TEMPLATE, "rb") as source, open(template_copy, "wb") as target:
+                target.write(source.read())
+            with self.assertRaisesRegex(ValueError, "only the bundled approved template"):
+                writer.render(template_copy, os.path.join(directory, "result.xlsx"), [])
 
 
 if __name__ == "__main__":
