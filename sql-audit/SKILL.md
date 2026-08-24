@@ -1,6 +1,6 @@
 ---
 name: sql-audit
-description: Audit SQL embedded in an uploaded code archive and produce the exact SQL review workbook requested by the user. Use this skill whenever a user submits or mentions a JAR, WAR, EAR, ZIP, TAR/TGZ, or other archive containing code and asks to extract, review, check, or audit SQL, database changes, MyBatis statements, JDBC queries, or embedded SQL. It also applies when the user does not say "sql-audit" but needs a rule-based SQL review workbook. Do not use it for decompiling class files, generic database design advice, or audits without a code archive.
+description: Audit SQL embedded in an uploaded code archive and produce the exact SQL review workbook requested by the user. Always use this skill whenever the user mentions sql-audit, write_report.py, sql-audit.json, 应用代码扫描结果.xlsx, 应用代码扫描结果模板.xlsx, template validation, a template fingerprint mismatch, an XLSX/ZIP validation error, or asks to run or diagnose the bundled SQL report writer, even if the user does not explicitly mention an archive audit. Also use it whenever a user submits or mentions a JAR, WAR, EAR, ZIP, TAR/TGZ, or other archive containing code and asks to extract, review, check, or audit SQL, database changes, MyBatis statements, JDBC queries, or embedded SQL. Do not use it for decompiling class files, generic database design advice, or audits without a code archive.
 compatibility: Python 3.9+; standard library only for archive/SQL extraction and XLSX writing. Optional 7z/RAR command-line tools enable those archive formats.
 ---
 
@@ -23,7 +23,9 @@ Use this skill for a code archive that may contain SQL. The final deliverable is
 - For every SQL, evaluate all 14 rules before deciding the result or writing findings. Keep every matched rule, including lower-severity matches found after a hard match; never stop at the first finding or discard advisory findings because a hard finding exists.
 - Derive each row's `审核结果` only after the complete rule pass: if at least one matched rule is `硬性`, the result is `不通过` even when one or more `建议` rules also match; if all matched rules are `建议`, the result is `建议`; if no rule matches, the result is `通过`.
 - Copy the template's result-cell styles so `不通过` is red, `建议` is yellow, and `通过` is green. Do not invent color values in the writer.
+- The approved template uses one shared visual system across all three worksheets: dark-blue header bands, consistent body typography/borders, and severity fills in the `规则级别` column (`硬性` red, `建议` yellow). The detail-sheet result prototypes use the matching `不通过` red, `建议` yellow, and `通过` green fills. Treat these template styles as authoritative and never replace them with agent-chosen colors.
 - Leave `人工复核结果` blank.
+- Treat the bundled `.xlsx` as a binary artifact. Never read it through a text-oriented viewer or decode it as UTF-8; replacement characters displayed by a tool are not evidence that the on-disk file is damaged. Use the writer's binary ZIP, worksheet, rule-catalog, and style validation as the source of truth; there is no fixed byte-level SHA requirement.
 
 ## Workflow
 
@@ -81,7 +83,11 @@ Important interpretations:
 
 ### 3. Write the workbook
 
-Run the bundled writer against its bundled template. Do not create the workbook manually, use a spreadsheet library directly, pass another template, modify the bundled template, or edit the generated workbook afterward. The writer verifies the approved template fingerprint before writing, always validates the result, and rejects any workbook whose rule sheet or styles differ from `assets/应用代码扫描结果模板.xlsx`.
+Run the bundled writer against its bundled template. Do not create the workbook manually, use a spreadsheet library directly, pass another template, modify the bundled template, or edit the generated workbook afterward. The writer validates that the bundled file is a valid XLSX and that its worksheets, headers, 14-rule catalog, and styles satisfy the contract; it always validates the result and rejects any workbook whose rule sheet or styles differ from `assets/应用代码扫描结果模板.xlsx`.
+
+If template verification fails with a bad ZIP/central-directory error, a worksheet/rule/style contract error, or any other template-read error, stop immediately. Do not edit or repair the template, use `openpyxl` or another spreadsheet library, pass an alternate template, manually recreate the workbook, or search for an unverified replacement skill. Report the exact error and path, then have the user restore the complete skill folder from one verified clean copy before retrying. A report produced after bypassing this check is invalid.
+
+Template versioning: an intentionally approved template update may change its SHA-256 or ZIP metadata without changing the contract. Keep the new file at the bundled path and rerun the structural, rule-catalog, style, and report-validation tests; a report-running agent must still use only that bundled file and must not replace or repair it at runtime.
 
 ```text
 python <skill-dir>/scripts/write_report.py \
@@ -89,7 +95,9 @@ python <skill-dir>/scripts/write_report.py \
   --output <working-dir>/应用代码扫描结果.xlsx
 ```
 
-The writer removes the three example data rows from the detail worksheet and uses them as the green, yellow, and red style prototypes. It appends one row per input record, resolves each finding's level and exact problem/suggestion text from the template's `规则列表`, discards any model-supplied problem/suggestion wording, applies hard-over-advisory precedence, numbers multiple findings in rule order, and leaves the manual-review column empty. It replaces the contents of the existing `汇总信息` worksheet with SQL total, pass/advisory/fail counts and matched-rule counts. It leaves `规则列表` untouched. With zero records it writes a valid three-sheet workbook. It rejects malformed audit JSON, findings whose rule ID is absent from the template, output text outside the template rule vocabulary, and SQL cells longer than the Excel cell limit rather than truncating them.
+To validate only the bundled template before auditing, run `python <skill-dir>/scripts/write_report.py --validate`; this mode does not require an audit JSON or create an output workbook.
+
+The writer removes the three example data rows from the detail worksheet and uses them as the green, yellow, and red style prototypes. The approved examples demonstrate an explicit-field bound-variable query (`通过`), a `SELECT *` query with a valid `WHERE` (`建议`), and a `SELECT *` query without a valid `WHERE` that hits both `BUS-002` and `BUS-003` (`不通过`); example text is never retained in a generated report. It appends one row per input record, resolves each finding's level and exact problem/suggestion text from the template's `规则列表`, discards any model-supplied problem/suggestion wording, applies hard-over-advisory precedence, numbers multiple findings in rule order, and leaves the manual-review column empty. It replaces the contents of the existing `汇总信息` worksheet with SQL total, pass/advisory/fail counts and matched-rule counts. It leaves `规则列表` untouched. With zero records it writes a valid three-sheet workbook. It rejects malformed audit JSON, findings whose rule ID is absent from the template, output text outside the template rule vocabulary, and SQL cells longer than the Excel cell limit rather than truncating them.
 
 The workbook's visual output is template-controlled: the writer validates the three-sheet contract, exact seven detail headers, all nine rule headers, exactly BUS-001 through BUS-014, every A:I rule cell as non-empty, and the three result-style prototypes. It copies the template's normal cell styles plus the matching green/yellow/red result style to every generated detail row, retains the summary sheet's template styles, preserves the template's `规则列表` worksheet byte-for-byte, and verifies `styles.xml` byte-for-byte. Style IDs are never invented by the writer.
 

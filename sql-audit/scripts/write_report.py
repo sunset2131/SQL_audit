@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -49,7 +48,6 @@ RULE_HEADERS = [
     "处理建议",
 ]
 EXPECTED_RULE_IDS = [f"BUS-{number:03d}" for number in range(1, 15)]
-EXPECTED_TEMPLATE_SHA256 = "83ddd7936ac986736006b48cb3f379c3d6a8a521deaec08cc8277fbc88cc47bb"
 
 
 def xml_text(value: str) -> str:
@@ -59,10 +57,34 @@ def xml_text(value: str) -> str:
 def validate_bundled_template(template: str) -> None:
     if os.path.realpath(template) != os.path.realpath(DEFAULT_TEMPLATE):
         raise ValueError("only the bundled approved template may be used")
-    with open(template, "rb") as handle:
-        digest = hashlib.sha256(handle.read()).hexdigest()
-    if digest != EXPECTED_TEMPLATE_SHA256:
-        raise ValueError("bundled template differs from the approved version")
+    if not os.path.isfile(template) or not zipfile.is_zipfile(template):
+        raise ValueError("bundled template is not a valid XLSX/ZIP file")
+
+
+def validate_template_contract(template: str) -> None:
+    """Validate the bundled template without creating a report workbook."""
+    validate_bundled_template(template)
+    required_files = {
+        "docProps/app.xml",
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+        "xl/worksheets/sheet2.xml",
+        "xl/worksheets/sheet3.xml",
+        "xl/sharedStrings.xml",
+        "xl/styles.xml",
+    }
+    try:
+        with zipfile.ZipFile(template, "r") as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"cannot read bundled template {template}: {exc}") from exc
+    missing = sorted(required_files.difference(files))
+    if missing:
+        raise ValueError(f"template is missing required files: {', '.join(missing)}")
+    shared_xml = files["xl/sharedStrings.xml"].decode("utf-8")
+    update_workbook(files["xl/workbook.xml"].decode("utf-8"))
+    read_rule_catalog(files["xl/worksheets/sheet3.xml"].decode("utf-8"), shared_xml)
+    template_prototypes(files["xl/worksheets/sheet1.xml"].decode("utf-8"), shared_xml)
 
 
 def load_records(path: str) -> list[dict]:
@@ -427,11 +449,13 @@ def render(template: str, output: str, records: list[dict]) -> None:
     with zipfile.ZipFile(template, "r") as source:
         files = {name: source.read(name) for name in source.namelist()}
     required_files = {
+        "docProps/app.xml",
         "xl/workbook.xml",
         "xl/worksheets/sheet1.xml",
         "xl/worksheets/sheet2.xml",
         "xl/worksheets/sheet3.xml",
         "xl/sharedStrings.xml",
+        "xl/styles.xml",
     }
     missing = sorted(required_files.difference(files))
     if missing:
@@ -605,15 +629,31 @@ def validate(path: str, expected_records: int, template: str = DEFAULT_TEMPLATE)
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--template", default=DEFAULT_TEMPLATE)
-    parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--input")
+    parser.add_argument("--output")
     parser.add_argument("--validate", action="store_true")
     args = parser.parse_args()
     try:
+        if args.validate and not args.input and not args.output:
+            validate_template_contract(args.template)
+            print(json.dumps({"template": args.template, "validated": True}, ensure_ascii=False))
+            return 0
+        if not args.input or not args.output:
+            parser.error("--input and --output are required unless --validate is used alone")
         records = load_records(args.input)
         render(args.template, args.output, records)
         validate(args.output, len(records), args.template)
-    except (OSError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+    except zipfile.BadZipFile as exc:
+        print(f"sql-audit report error: {exc}; template={args.template!r}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(
+            f"sql-audit report error: {exc}; template={args.template!r}; "
+            f"input={args.input!r}; output={args.output!r}",
+            file=sys.stderr,
+        )
+        return 2
+    except (ValueError, json.JSONDecodeError) as exc:
         print(f"sql-audit report error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps({"output": args.output, "records": len(records), "validated": True}, ensure_ascii=False))

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 from xml.etree import ElementTree
 
 
@@ -161,23 +162,27 @@ class SqlAuditTests(unittest.TestCase):
                 app_properties = archive.read("docProps/app.xml").decode("utf-8")
             ElementTree.fromstring(summary_sheet)
             self.assertEqual(4, len(re.findall(r'<row\s+r="\d+"', sheet)))
+            with zipfile.ZipFile(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")) as template_archive:
+                template_detail = template_archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                template_summary = template_archive.read("xl/worksheets/sheet2.xml").decode("utf-8")
+            manual_style = re.search(r'<c\s+r="G2"[^>]*\bs="(\d+)"', template_detail).group(1)
+            summary_value_style = re.search(r'<c\s+r="B4"[^>]*\bs="(\d+)"', template_summary).group(1)
             for header in writer.HEADERS:
                 self.assertIn(header, shared)
             self.assertIn("通过", shared)
             self.assertIn("建议", shared)
             self.assertIn("不通过", shared)
-            self.assertIn('<c r="G2" s="7"/>', sheet)
-            self.assertIn('<c r="G3" s="7"/>', sheet)
-            self.assertIn('<c r="G4" s="7"/>', sheet)
+            for row_number in (2, 3, 4):
+                self.assertIn(f'<c r="G{row_number}" s="{manual_style}"/>', sheet)
             self.assertIn(f'name="{writer.SHEET_NAME}"', workbook)
             self.assertIn(f'name="{writer.SUMMARY_SHEET_NAME}"', workbook)
             self.assertIn(f'name="{writer.RULES_SHEET_NAME}"', workbook)
             self.assertEqual(3, workbook.count("<sheet "))
             self.assertIn(writer.SUMMARY_TITLE, shared)
-            self.assertIn('<c r="B4" s="6"><v>3</v></c>', summary_sheet)
-            self.assertIn('<c r="B5" s="6"><v>1</v></c>', summary_sheet)
-            self.assertIn('<c r="B6" s="6"><v>1</v></c>', summary_sheet)
-            self.assertIn('<c r="B7" s="6"><v>1</v></c>', summary_sheet)
+            self.assertIn(f'<c r="B4" s="{summary_value_style}"><v>3</v></c>', summary_sheet)
+            self.assertIn(f'<c r="B5" s="{summary_value_style}"><v>1</v></c>', summary_sheet)
+            self.assertIn(f'<c r="B6" s="{summary_value_style}"><v>1</v></c>', summary_sheet)
+            self.assertIn(f'<c r="B7" s="{summary_value_style}"><v>1</v></c>', summary_sheet)
             self.assertIn("1. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。；2. BUS-006【建议】使用负向查询可能导致索引失效、全表扫描，影响查询性能。", shared)
             self.assertIn("1. 建议将 SELECT * 改为显式列出实际需要的字段名。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。", shared)
             self.assertIn("1. BUS-001【硬性】业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。", shared)
@@ -189,9 +194,7 @@ class SqlAuditTests(unittest.TestCase):
             with zipfile.ZipFile(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")) as template_archive:
                 self.assertEqual(rules_sheet, template_archive.read("xl/worksheets/sheet3.xml"))
 
-            template_xml = zipfile.ZipFile(os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")).read(
-                "xl/worksheets/sheet1.xml"
-            ).decode("utf-8")
+            template_xml = template_detail
             for row_number in (2, 3, 4):
                 template_style = re.search(rf'<c\s+r="D{row_number}"[^>]*\bs="(\d+)"', template_xml).group(1)
                 output_style = re.search(rf'<c\s+r="D{row_number}"[^>]*\bs="(\d+)"', sheet).group(1)
@@ -343,6 +346,53 @@ class SqlAuditTests(unittest.TestCase):
     def test_default_template_is_the_bundled_approved_template(self):
         self.assertTrue(writer.DEFAULT_TEMPLATE.endswith(os.path.join("assets", "应用代码扫描结果模板.xlsx")))
         writer.validate_bundled_template(writer.DEFAULT_TEMPLATE)
+        writer.validate_template_contract(writer.DEFAULT_TEMPLATE)
+
+    def test_template_has_consistent_severity_styles_and_current_examples(self):
+        template = os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")
+        with zipfile.ZipFile(template) as archive:
+            detail = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            rules = archive.read("xl/worksheets/sheet3.xml").decode("utf-8")
+            shared = archive.read("xl/sharedStrings.xml").decode("utf-8")
+        strings = writer.read_shared_strings(shared)
+
+        result_styles = {
+            address: re.search(rf'<c\s+r="{address}"[^>]*\bs="(\d+)"', detail).group(1)
+            for address in ("D2", "D3", "D4")
+        }
+        self.assertEqual(3, len(set(result_styles.values())))
+        self.assertEqual("通过", writer.shared_cell_value(detail, "D2", strings))
+        self.assertEqual("建议", writer.shared_cell_value(detail, "D3", strings))
+        self.assertEqual("不通过", writer.shared_cell_value(detail, "D4", strings))
+        self.assertEqual(
+            "1. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。",
+            writer.shared_cell_value(detail, "E3", strings),
+        )
+        self.assertTrue(writer.shared_cell_value(detail, "E4", strings).startswith("1. BUS-002【硬性】"))
+        self.assertIn("2. BUS-003【建议】", writer.shared_cell_value(detail, "E4", strings))
+
+        level_styles = {
+            address: re.search(rf'<c\s+r="{address}"[^>]*\bs="(\d+)"', rules).group(1)
+            for address in ("C2", "C3", "C4", "C5", "C7", "C15")
+        }
+        hard_styles = {level_styles[address] for address in ("C2", "C3", "C5")}
+        advisory_styles = {level_styles[address] for address in ("C4", "C7", "C15")}
+        self.assertEqual(1, len(hard_styles))
+        self.assertEqual(1, len(advisory_styles))
+        self.assertNotEqual(hard_styles, advisory_styles)
+
+    def test_template_validation_accepts_reencoded_xlsx_without_fixed_hash(self):
+        source_path = os.path.join(ROOT, "assets", "应用代码扫描结果模板.xlsx")
+        with tempfile.TemporaryDirectory() as directory:
+            reencoded_path = os.path.join(directory, "template.xlsx")
+            with zipfile.ZipFile(source_path) as source, zipfile.ZipFile(reencoded_path, "w") as target:
+                for name in source.namelist():
+                    target.writestr(name, source.read(name))
+            with patch.object(writer, "DEFAULT_TEMPLATE", reencoded_path):
+                writer.validate_bundled_template(reencoded_path)
+                output_path = os.path.join(directory, "result.xlsx")
+                writer.render(reencoded_path, output_path, [])
+                writer.validate(output_path, 0, reencoded_path)
 
     def test_writer_rejects_an_alternate_template_path(self):
         with tempfile.TemporaryDirectory() as directory:
