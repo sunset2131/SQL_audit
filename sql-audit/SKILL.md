@@ -20,7 +20,8 @@ Use this skill for a code archive that may contain SQL. The final deliverable is
 - Because the approved template has no separate line-number column, write the extractor's SQL start line in the `代码文件` cell as `source（第N行）`; if no valid line number is available, keep the source path unchanged.
 - Write the SQL total, pass/advisory/fail counts, and matched-rule counts into the existing `汇总信息` worksheet. Preserve the existing `规则列表` worksheet byte-for-byte from the approved template; do not populate, clear, reorder, or restyle it.
 - Prefer a user-supplied database type. Otherwise infer only `Oracle`, `Mysql`, `Kingbase`, `Gbase`, or `Gaussdb` from source/config/SQL evidence. If no supported type matches, leave the cell blank.
-- Derive each row's `审核结果` from the rule levels in the template's `规则列表`: any `硬性` finding makes the result `不通过`; findings that are all `建议` make it `建议`; no findings make it `通过`.
+- For every SQL, evaluate all 14 rules before deciding the result or writing findings. Keep every matched rule, including lower-severity matches found after a hard match; never stop at the first finding or discard advisory findings because a hard finding exists.
+- Derive each row's `审核结果` only after the complete rule pass: if at least one matched rule is `硬性`, the result is `不通过` even when one or more `建议` rules also match; if all matched rules are `建议`, the result is `建议`; if no rule matches, the result is `通过`.
 - Copy the template's result-cell styles so `不通过` is red, `建议` is yellow, and `通过` is green. Do not invent color values in the writer.
 - Leave `人工复核结果` blank.
 
@@ -67,7 +68,8 @@ Use only the exact `存在问题` and `处理建议` text from the matching row 
 
 Important interpretations:
 
-- A finding's output severity is controlled by the matching rule level in the approved template. The audit JSON does not need to duplicate that level.
+- The matching rule level in the approved template controls output severity. The audit JSON does not need to duplicate that level, but the complete-match requirement still applies: first finish checking BUS-001 through BUS-014, then retain every matched rule in `findings`.
+- Use this mandatory per-SQL audit protocol: (1) initialize an empty match set; (2) check BUS-001, BUS-002, ..., BUS-014 one by one against the complete SQL; (3) add every matching rule ID exactly once; (4) perform a second pass to confirm no rule was skipped; (5) sort findings in template order; and only then (6) apply the result precedence `硬性` > `建议` > no finding. A hard match changes the result color and label, but never suppresses other matched rules from `存在问题`, `处理建议`, or the summary counts.
 - When one SQL matches several rules, number `存在问题` as `1. BUS-00x【硬性/建议】<template problem>；2. BUS-00x【硬性/建议】<template problem>` and number `处理建议` as `1. ...\n2. ...`, preserving the template rule order. With no findings, write `无` in both fields.
 - Audit every SQL against all 14 rules before writing findings. Do not stop after the first match. In particular, a `SELECT *` statement can also match `BUS-002` when its effective WHERE is absent, `BUS-004` for hard-coded values, and/or `BUS-006` for negative predicates; a `DELETE` or `UPDATE` can also match `BUS-002` when its effective WHERE is absent or only `WHERE 1=1`.
 - Treat `?`, `:name`, `$1`, and MyBatis `#{item}` or `#{object.property}` (including optional type metadata after a comma) as bound placeholders for `BUS-004`. Do not report these as hard-coded constants. MyBatis `${item}` is string substitution, not a bound placeholder, and remains subject to `BUS-004` when it represents a business value.
