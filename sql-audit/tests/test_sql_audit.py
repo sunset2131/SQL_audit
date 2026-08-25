@@ -53,7 +53,10 @@ class SqlAuditTests(unittest.TestCase):
         self.assertEqual(auditor.audit_one(cases["BUS-009"]), auditor.audit_one(cases["BUS-009"]))
 
     def test_auditor_recognizes_mybatis_bindings_and_effective_where(self):
+        self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE fault_id = #{faultId}"))
         self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE id = #{item,jdbcType=BIGINT}"))
+        self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE fault_id = #{faultId,jdbcType=VARCHAR}"))
+        self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE fault_id = #{object.faultId}"))
         self.assertNotIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE id = :name"))
         self.assertIn("BUS-004", auditor.audit_one("SELECT id FROM users WHERE id = ${item}"))
         self.assertNotIn("BUS-003", auditor.audit_one("SELECT COUNT(*) FROM users WHERE id = #{id}"))
@@ -61,6 +64,28 @@ class SqlAuditTests(unittest.TestCase):
         self.assertIn("BUS-002", auditor.audit_one("SELECT * FROM users WHERE 1 = 1"))
         self.assertNotIn("BUS-002", auditor.audit_one("SELECT * FROM users WHERE 1 = 1 AND id = #{id}"))
         self.assertNotIn("BUS-002", auditor.audit_one("WITH active AS (SELECT id FROM users) SELECT id FROM active WHERE id = #{id}"))
+
+    def test_bus004_excludes_ddl_and_structural_constants(self):
+        self.assertIn("BUS-001", auditor.audit_one("CREATE TABLE users (status INT DEFAULT 0)"))
+        self.assertNotIn("BUS-004", auditor.audit_one("CREATE TABLE users (status INT DEFAULT 0)"))
+        self.assertNotIn("BUS-004", auditor.audit_one("RENAME TABLE old_users TO users"))
+        self.assertNotIn(
+            "BUS-004",
+            auditor.audit_one(
+                "SELECT DATE_FORMAT(FROM_UNIXTIME(event_time / 1000), '%Y-%m') "
+                "FROM events WHERE event_id = #{eventId}"
+            ),
+        )
+        self.assertNotIn(
+            "BUS-004",
+            auditor.audit_one("SELECT id FROM users WHERE name != '' AND id = #{id}"),
+        )
+
+    def test_cdata_does_not_hide_mybatis_binding(self):
+        sql = "SELECT id FROM users WHERE created_at <![CDATA[<]]> #{faultId}"
+        tokens = auditor.tokenize(sql)
+        self.assertIn("#{faultId}", [token.value for token in tokens if token.kind == "bound"])
+        self.assertNotIn("BUS-004", auditor.audit_one(sql))
 
     def test_auditor_keeps_record_order_and_reports_bus014_without_guessing(self):
         payload = {
@@ -152,6 +177,24 @@ class SqlAuditTests(unittest.TestCase):
         records = list(extractor.extract_from_text(source))
         self.assertEqual(1, len(records))
         self.assertIn("#{item}", records[0]["sql"])
+
+    def test_properties_and_comment_only_sql_are_not_extracted(self):
+        source = extractor.SourceText(
+            "i18n/messages.properties",
+            "notice=Please UPDATE the profile WITH the latest value\n"
+            "query=\"SELECT id FROM users WHERE id = ?\"\n",
+            0,
+        )
+        records = list(extractor.extract_from_text(source))
+        self.assertEqual(1, len(records))
+        self.assertTrue(records[0]["sql"].startswith("SELECT id FROM users"))
+
+        commented = extractor.SourceText(
+            "db/migration/V001.sql",
+            "-- UPDATE users SET status = 1 WHERE id = 2;\n",
+            0,
+        )
+        self.assertEqual([], list(extractor.extract_from_text(commented)))
 
     def test_writer_preserves_contract(self):
         records = [

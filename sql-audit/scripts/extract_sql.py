@@ -250,14 +250,54 @@ def statement_parts(text: str, base_line: int) -> Iterator[tuple[str, int]]:
             i = len(text) if end < 0 else end + 1
         elif char == ";":
             part = text[start:i].strip()
-            if SQL_START.search(part):
+            if SQL_START.search(sql_detection_text(part)):
                 yield part, statement_line
             start = i + 1
             statement_line = line
         i += 1
     part = text[start:].strip()
-    if SQL_START.search(part):
+    if SQL_START.search(sql_detection_text(part)):
         yield part, statement_line
+
+
+def sql_detection_text(value: str) -> str:
+    """Remove comments and quoted literals for SQL keyword detection only."""
+    output: list[str] = []
+    i = 0
+    while i < len(value):
+        if value.startswith("--", i) or value.startswith("//", i):
+            end = value.find("\n", i + 2)
+            if end < 0:
+                break
+            output.append("\n")
+            i = end + 1
+            continue
+        if value.startswith("/*", i):
+            end = value.find("*/", i + 2)
+            if end < 0:
+                break
+            output.append(" " * (end + 2 - i))
+            i = end + 2
+            continue
+        if value[i] in {"'", '"', "`"}:
+            quote = value[i]
+            i += 1
+            while i < len(value):
+                if value[i] == "\\":
+                    i += 2
+                    continue
+                if value[i] == quote:
+                    if i + 1 < len(value) and value[i + 1] == quote:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            output.append(" ")
+            continue
+        output.append(value[i])
+        i += 1
+    return "".join(output)
 
 
 def likely_sql(value: str) -> bool:
@@ -292,6 +332,11 @@ def extract_from_text(source: SourceText) -> Iterator[dict]:
     for match in STRING_RE.finditer(text):
         value = next((group for group in match.groups() if group is not None), "")
         value = unescape_literal(value).strip()
+        # Translation/property values frequently contain words such as
+        # "WITH" or "UPDATE". Only accept a properties value when it starts
+        # with an actual SQL statement keyword.
+        if lower.endswith(".properties") and not SQL_START.match(value):
+            continue
         if likely_sql(value) and len(value) <= MAX_SQL_LENGTH:
             yield {"sql": value, "line": text.count("\n", 0, match.start()) + 1, "extractor": "literal"}
 

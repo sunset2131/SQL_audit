@@ -36,8 +36,21 @@ class Token:
 
 WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 NUMBER_RE = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+# MyBatis ``#{...}`` is a prepared/bound parameter regardless of its name.
+# Keep the body permissive because MyBatis allows property paths and optional
+# type metadata, e.g. ``#{faultId}``, ``#{item.id}``, and
+# ``#{faultId,jdbcType=VARCHAR}``.
 BOUND_RE = re.compile(r"#\{[^{}]*\}")
 SUBST_RE = re.compile(r"\$\{[^{}]*\}")
+CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+DDL_KEYWORDS = {"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT", "GRANT", "REVOKE"}
+STRUCTURAL_TIME_FUNCTIONS = {
+    "DATE_FORMAT",
+    "FROM_UNIXTIME",
+    "TO_CHAR",
+    "TO_DATE",
+    "UNIX_TIMESTAMP",
+}
 
 
 def validate_rule_reference(path: str = RULE_REFERENCE) -> None:
@@ -55,6 +68,9 @@ def validate_rule_reference(path: str = RULE_REFERENCE) -> None:
 
 def tokenize(sql: str) -> list[Token]:
     """Tokenize SQL while removing comments and preserving string literals."""
+    # XML extraction can leave CDATA wrappers around operators. Remove only
+    # the wrappers so the SQL body and MyBatis bindings remain intact.
+    sql = CDATA_RE.sub(lambda match: match.group(1), sql)
     tokens: list[Token] = []
     i = 0
     depth = 0
@@ -176,7 +192,7 @@ def word_indices(tokens: list[Token], word: str, depth: Optional[int] = None) ->
 def first_statement_keyword(tokens: list[Token]) -> Optional[str]:
     for token in tokens:
         if token.kind == "word":
-            if token.upper in {"SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "CREATE", "ALTER", "DROP", "TRUNCATE", "WITH"}:
+            if token.upper in {"SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT", "GRANT", "REVOKE", "WITH"}:
                 return token.upper
     return None
 
@@ -265,6 +281,18 @@ def has_hardcoded_business_value(tokens: list[Token]) -> bool:
                 continue
             if token.kind == "number" and previous and previous.value == "=" and previous_two and previous_two.kind == "number":
                 continue
+            # Empty-string checks and time-unit multipliers are structural SQL
+            # expressions, not business values that need parameter binding.
+            if token.kind == "string" and token.value == "":
+                continue
+            if token.kind == "number" and previous and previous.value in {"*", "/"}:
+                recent_words = {
+                    candidate.upper
+                    for candidate in tokens[max(0, i - 12):i]
+                    if candidate.kind == "word"
+                }
+                if recent_words.intersection(STRUCTURAL_TIME_FUNCTIONS):
+                    continue
             return True
     return False
 
@@ -441,7 +469,8 @@ def audit_one(sql: str, schema: Optional[dict[str, Any]] = None) -> list[str]:
     if not tokens:
         return []
     matches: set[str] = set()
-    if any(token.kind == "word" and token.upper in {"TRUNCATE", "CREATE", "ALTER", "DROP", "RENAME", "COMMENT", "GRANT", "REVOKE"} for token in tokens):
+    statement_keyword = first_statement_keyword(tokens)
+    if any(token.kind == "word" and token.upper in DDL_KEYWORDS for token in tokens):
         matches.add("BUS-001")
     dml_candidates = [i for i, token in enumerate(tokens) if token.kind == "word" and token.upper in {"SELECT", "DELETE", "UPDATE"}]
     minimum_depth = min((tokens[i].depth for i in dml_candidates), default=None)
@@ -450,7 +479,9 @@ def audit_one(sql: str, schema: Optional[dict[str, Any]] = None) -> list[str]:
         matches.add("BUS-002")
     if select_list_has_star(tokens):
         matches.add("BUS-003")
-    if has_hardcoded_business_value(tokens):
+    # BUS-004 applies to business SQL, not database-object definitions. DDL
+    # remains in the population and is handled by BUS-001 only.
+    if statement_keyword not in DDL_KEYWORDS and has_hardcoded_business_value(tokens):
         matches.add("BUS-004")
     if has_null_comparison(tokens):
         matches.add("BUS-005")
