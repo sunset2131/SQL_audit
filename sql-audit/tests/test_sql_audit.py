@@ -33,7 +33,7 @@ class SqlAuditTests(unittest.TestCase):
 
     def test_deterministic_auditor_matches_all_rule_families(self):
         cases = {
-            "BUS-001": "CREATE TABLE users (id INT)",
+            "BUS-001": "CREATE VIEW active_users AS SELECT id FROM users",
             "BUS-002": "SELECT * FROM users",
             "BUS-003": "SELECT * FROM users WHERE id = #{id}",
             "BUS-004": "SELECT id FROM users WHERE id = 42",
@@ -66,8 +66,11 @@ class SqlAuditTests(unittest.TestCase):
         self.assertNotIn("BUS-002", auditor.audit_one("WITH active AS (SELECT id FROM users) SELECT id FROM active WHERE id = #{id}"))
 
     def test_bus004_excludes_ddl_and_structural_constants(self):
-        self.assertIn("BUS-001", auditor.audit_one("CREATE TABLE users (status INT DEFAULT 0)"))
+        self.assertNotIn("BUS-001", auditor.audit_one("CREATE TABLE users (status INT DEFAULT 0)"))
         self.assertNotIn("BUS-004", auditor.audit_one("CREATE TABLE users (status INT DEFAULT 0)"))
+        self.assertIn("BUS-001", auditor.audit_one("CREATE VIEW active_users AS SELECT id FROM users"))
+        self.assertIn("BUS-001", auditor.audit_one("ALTER TABLE users ADD COLUMN status INT"))
+        self.assertIn("BUS-001", auditor.audit_one("DROP TABLE users"))
         self.assertNotIn("BUS-004", auditor.audit_one("RENAME TABLE old_users TO users"))
         self.assertNotIn(
             "BUS-004",
@@ -80,6 +83,15 @@ class SqlAuditTests(unittest.TestCase):
             "BUS-004",
             auditor.audit_one("SELECT id FROM users WHERE name != '' AND id = #{id}"),
         )
+
+    def test_bus006_only_checks_where_predicates(self):
+        self.assertNotIn("BUS-006", auditor.audit_one("SELECT NOT NULL AS marker FROM users WHERE id = #{id}"))
+        self.assertNotIn("BUS-006", auditor.audit_one("SELECT a.id FROM a JOIN b ON a.id != b.id WHERE a.id = #{id}"))
+        self.assertIn("BUS-006", auditor.audit_one("SELECT id FROM users WHERE status NOT IN (#{status})"))
+        self.assertIn("BUS-006", auditor.audit_one("SELECT id FROM users WHERE a != b"))
+        self.assertIn("BUS-006", auditor.audit_one("SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM roles WHERE roles.id = users.role_id)"))
+        self.assertNotIn("BUS-006", auditor.audit_one("SELECT id FROM users WHERE deleted_at IS NOT NULL"))
+        self.assertNotIn("BUS-006", auditor.audit_one("SELECT id FROM users WHERE note = 'NOT IN' -- !=\n"))
 
     def test_cdata_does_not_hide_mybatis_binding(self):
         sql = "SELECT id FROM users WHERE created_at <![CDATA[<]]> #{faultId}"
@@ -276,7 +288,7 @@ class SqlAuditTests(unittest.TestCase):
             self.assertIn(f'<c r="B5" s="{summary_value_style}"><v>1</v></c>', summary_sheet)
             self.assertIn(f'<c r="B6" s="{summary_value_style}"><v>1</v></c>', summary_sheet)
             self.assertIn(f'<c r="B7" s="{summary_value_style}"><v>1</v></c>', summary_sheet)
-            self.assertIn("1. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。；2. BUS-006【建议】使用负向查询可能导致索引失效、全表扫描，影响查询性能。", shared)
+            self.assertIn("1. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。；2. BUS-006【建议】使用负向查询可能导致SQL不走索引、全表扫描，影响查询性能。", shared)
             self.assertIn("1. 建议将 SELECT * 改为显式列出实际需要的字段名。\n2. 建议改写为正向条件，如使用 IN 替代 NOT IN（需注意 NULL 值处理），或使用 EXISTS 替代 NOT EXISTS 等。", shared)
             self.assertIn("1. BUS-001【硬性】业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. BUS-003【建议】使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。", shared)
             self.assertIn("1. 去除 DDL 语句，将结构变更操作移交 DBA 或运维通过变更流程执行；如确需清理数据，改用 DELETE 并分批提交。\n2. 建议将 SELECT * 改为显式列出实际需要的字段名。", shared)
@@ -349,6 +361,12 @@ class SqlAuditTests(unittest.TestCase):
             "使用 SELECT * 未显式指定查询字段，返回列不明确，可能包含不需要的列。",
             catalog["BUS-003"]["problem"],
         )
+        self.assertIn("4、CREATE TABLE被允许，应判定为合法。", catalog["BUS-001"]["audit_method"])
+        self.assertEqual(
+            "使用负向查询可能导致SQL不走索引、全表扫描，影响查询性能。",
+            catalog["BUS-006"]["problem"],
+        )
+        self.assertTrue(catalog["BUS-006"]["audit_method"].startswith("1、检查 WHERE 子句中"))
         self.assertEqual(
             "为条件列创建合适的索引，或调整查询条件以利用现有索引；若无法确认索引情况，请补充数据模型后重新审核。",
             catalog["BUS-014"]["suggestion"],
@@ -390,7 +408,7 @@ class SqlAuditTests(unittest.TestCase):
                 strings = writer.read_shared_strings(archive.read("xl/sharedStrings.xml").decode("utf-8"))
             self.assertEqual("不通过", writer.shared_cell_value(sheet, "D2", strings))
             self.assertEqual(
-                "1. BUS-001【硬性】业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. BUS-006【建议】使用负向查询可能导致索引失效、全表扫描，影响查询性能。",
+                "1. BUS-001【硬性】业务 SQL 中直接包含 DDL 语句，属于高危操作，可能引发锁表、数据丢失或意外结构变更。；2. BUS-006【建议】使用负向查询可能导致SQL不走索引、全表扫描，影响查询性能。",
                 writer.shared_cell_value(sheet, "E2", strings),
             )
             self.assertEqual(

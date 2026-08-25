@@ -24,6 +24,8 @@
         "DDL/database-object 定义只命中 BUS-001，不因 DEFAULT 或其他定义常量命中 BUS-004；CDATA 中的 #{faultId} 仍按绑定变量处理。",
         "同一 XML 中可解析的 MyBatis <include refid=\"...\"/> 会展开后再审核；无法解析时不臆测其是否提供有效 WHERE。",
         "BUS-002 同时适用于 SELECT、DELETE 和 UPDATE；SELECT 无有效 WHERE 时使用 BUS-002 的模板原文，不新增规则。",
+        "BUS-001 允许 CREATE TABLE 并判定为合法；CREATE VIEW、ALTER、DROP 等其他 DDL 仍命中 BUS-001。",
+        "BUS-006 仅检查 WHERE 子句（含嵌套 WHERE）中的 NOT、!=、<>、NOT EXISTS、NOT IN；SELECT NOT NULL 和 JOIN ... ON != 不命中，IS NOT NULL 不命中。",
         "必须在 write_report.py 前调用技能目录内的 audit_sql.py；不得由 agent 手工生成或修改 findings。",
         "audit_sql.py 按固定 BUS-001 至 BUS-014 顺序输出唯一 rule_id，保持输入记录顺序，结果在相同输入下可重复。"
       ]

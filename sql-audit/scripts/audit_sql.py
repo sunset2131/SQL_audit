@@ -302,15 +302,54 @@ def has_null_comparison(tokens: list[Token]) -> bool:
 
 
 def has_negative_query(tokens: list[Token]) -> bool:
+    # BUS-006 is a predicate rule.  Restrict the scan to WHERE bodies so
+    # SELECT NOT NULL and JOIN ... ON a != b do not become findings.  Nested
+    # WHERE clauses are visited independently; skip their full subquery span
+    # while scanning an outer WHERE to avoid counting predicates from JOIN/ON
+    # or SELECT lists inside that subquery.
+    for where_index, where in enumerate(tokens):
+        if where.kind != "word" or where.upper != "WHERE":
+            continue
+        depth = where.depth
+        end = clause_end(
+            tokens,
+            where_index + 1,
+            depth,
+            {"GROUP", "ORDER", "LIMIT", "OFFSET", "FETCH", "RETURNING", "FOR", "UNION", "EXCEPT", "INTERSECT"},
+        )
+        i = where_index + 1
+        while i < end:
+            token = tokens[i]
+            if token.kind == "word" and token.upper == "SELECT" and token.depth > depth:
+                # A SELECT nested in this WHERE starts a subquery.  Its own
+                # WHERE, if any, will be checked by the outer loop.
+                subquery_depth = token.depth
+                i += 1
+                while i < end and not (tokens[i].value == ")" and tokens[i].depth < subquery_depth):
+                    i += 1
+                i += 1
+                continue
+            if token.value in {"!=", "<>"}:
+                return True
+            if token.kind == "word" and token.upper == "NOT":
+                previous = tokens[i - 1].upper if i else ""
+                following = tokens[i + 1].upper if i + 1 < len(tokens) else ""
+                if previous == "IS" or following == "NULL":
+                    i += 1
+                    continue
+                return True
+            i += 1
+    return False
+
+
+def has_forbidden_ddl(tokens: list[Token]) -> bool:
+    """Return whether SQL contains DDL other than the approved CREATE TABLE."""
     for i, token in enumerate(tokens):
-        if token.value in {"!=", "<>"}:
-            return True
-        if token.kind != "word" or token.upper != "NOT":
+        if token.kind != "word" or token.upper not in DDL_KEYWORDS:
             continue
-        previous = tokens[i - 1].upper if i else ""
-        following = tokens[i + 1].upper if i + 1 < len(tokens) else ""
-        if previous == "IS" or following == "NULL":
-            continue
+        if token.upper == "CREATE":
+            if i + 1 < len(tokens) and tokens[i + 1].kind == "word" and tokens[i + 1].upper == "TABLE":
+                continue
         return True
     return False
 
@@ -470,7 +509,7 @@ def audit_one(sql: str, schema: Optional[dict[str, Any]] = None) -> list[str]:
         return []
     matches: set[str] = set()
     statement_keyword = first_statement_keyword(tokens)
-    if any(token.kind == "word" and token.upper in DDL_KEYWORDS for token in tokens):
+    if has_forbidden_ddl(tokens):
         matches.add("BUS-001")
     dml_candidates = [i for i, token in enumerate(tokens) if token.kind == "word" and token.upper in {"SELECT", "DELETE", "UPDATE"}]
     minimum_depth = min((tokens[i].depth for i in dml_candidates), default=None)
