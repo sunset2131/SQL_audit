@@ -1,7 +1,7 @@
 ---
 name: sql-audit
 description: Audit SQL embedded in an uploaded code archive and produce the exact SQL review workbook requested by the user. Always use this skill whenever the user mentions sql-audit, write_report.py, sql-audit.json, 应用代码扫描结果.xlsx, 应用代码扫描结果模板.xlsx, template validation, a template fingerprint mismatch, an XLSX/ZIP validation error, or asks to run or diagnose the bundled SQL report writer, even if the user does not explicitly mention an archive audit. Also use it whenever a user submits or mentions a JAR, WAR, EAR, ZIP, TAR/TGZ, or other archive containing code and asks to extract, review, check, or audit SQL, database changes, MyBatis statements, JDBC queries, or embedded SQL. Do not use it for decompiling class files, generic database design advice, or audits without a code archive.
-compatibility: Python 3.9+; standard library only for archive extraction, deterministic SQL auditing, and XLSX writing. Optional 7z/RAR command-line tools enable those archive formats.
+compatibility: Python 3.9+ preferred; Python 3.7 may be used only after no 3.9+ interpreter can be found and the bundled scripts are minimally adapted without changing behavior. Standard library only for archive extraction, deterministic SQL auditing, and XLSX writing. Optional 7z/RAR command-line tools enable those archive formats.
 ---
 
 # SQL Audit
@@ -30,12 +30,22 @@ Use this skill for a code archive that may contain SQL. The final deliverable is
 
 ## Workflow
 
+### 0. Select the Python interpreter
+
+Before running or modifying any bundled script, locate the newest available Python interpreter. Do not assume the default `python3` or `python` is the newest installation. Probe executable names such as `python3.12`, `python3.11`, `python3.10`, `python3.9`, `python3`, and `python`; on Windows also probe the Python Launcher with `py -3.12`, `py -3.11`, `py -3.10`, and `py -3.9`. If these commands do not expose Python 3.9+, inspect reasonable system installation locations and the executable search path before concluding that no supported interpreter exists.
+
+Verify each candidate by running its version command. Select the newest working Python 3.9+ interpreter and use that exact command consistently for extraction, auditing, report writing, validation, compilation, and tests. In the commands below, `<python-command>` means this verified interpreter command.
+
+If the default `python3` is Python 3.7 but Python 3.9+ exists elsewhere, use the higher-version interpreter. Do not rewrite or downgrade the scripts merely because the default command points to Python 3.7.
+
+Only after a thorough search confirms that no Python 3.9+ interpreter is available may the agent modify the bundled Python scripts for Python 3.7 compatibility. Keep such edits minimal and syntax-focused. Do not change rule matching, extraction coverage, JSON contracts, template validation, workbook content, styles, or output precedence. Preserve a clear record of the compatibility changes, then compile every script with the selected Python 3.7 interpreter and run the complete test suite plus template validation. If equivalent behavior cannot be demonstrated, stop and report the exact incompatibility instead of producing a report.
+
 ### 1. Locate and extract candidates
 
 Use the bundled helper instead of manually unpacking files:
 
 ```text
-python <skill-dir>/scripts/extract_sql.py \
+<python-command> <skill-dir>/scripts/extract_sql.py \
   --input <archive> \
   --output <working-dir>/sql-candidates.json \
   [--db-type Oracle|Mysql|Kingbase|Gbase|Gaussdb]
@@ -52,7 +62,7 @@ Read `references/rule.md` completely before auditing. The bundled rule reference
 Run the bundled deterministic auditor against the extractor output:
 
 ```text
-python <skill-dir>/scripts/audit_sql.py \
+<python-command> <skill-dir>/scripts/audit_sql.py \
   --input <working-dir>/sql-candidates.json \
   --output <working-dir>/sql-audit.json \
   [--schema <working-dir>/schema-indexes.json]
@@ -113,12 +123,12 @@ If template verification fails with a bad ZIP/central-directory error, a workshe
 Template versioning: an intentionally approved template update may change its SHA-256 or ZIP metadata without changing the contract. Keep the new file at the bundled path and rerun the structural, rule-catalog, style, and report-validation tests; a report-running agent must still use only that bundled file and must not replace or repair it at runtime.
 
 ```text
-python <skill-dir>/scripts/write_report.py \
+<python-command> <skill-dir>/scripts/write_report.py \
   --input <working-dir>/sql-audit.json \
   --output <working-dir>/应用代码扫描结果.xlsx
 ```
 
-To validate only the bundled template before auditing, run `python <skill-dir>/scripts/write_report.py --validate`; this mode does not require an audit JSON or create an output workbook.
+To validate only the bundled template before auditing, run `<python-command> <skill-dir>/scripts/write_report.py --validate`; this mode does not require an audit JSON or create an output workbook.
 
 The writer removes the three example data rows from the detail worksheet and uses them as the green, yellow, and red style prototypes. The approved examples demonstrate an explicit-field bound-variable query (`通过`), a `SELECT *` query with a valid `WHERE` (`建议`), and a `SELECT *` query without a valid `WHERE` that hits both `BUS-002` and `BUS-003` (`不通过`); example text is never retained in a generated report. It appends one row per input record, resolves each finding's level and exact problem/suggestion text from the template's `规则列表`, discards any model-supplied problem/suggestion wording, applies hard-over-advisory precedence, numbers multiple findings in rule order, and leaves the manual-review column empty. It replaces the contents of the existing `汇总信息` worksheet with SQL total, pass/advisory/fail counts and matched-rule counts. It leaves `规则列表` untouched. With zero records it writes a valid three-sheet workbook. It rejects malformed audit JSON, findings whose rule ID is absent from the template, output text outside the template rule vocabulary, and SQL cells longer than the Excel cell limit rather than truncating them.
 
